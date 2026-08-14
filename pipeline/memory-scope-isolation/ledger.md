@@ -2,7 +2,7 @@
 change_id: memory-scope-isolation
 grade: L3
 contract_tier: cases
-stage: s1b
+stage: s2a
 stage_status: done
 pending: null
 base_commit: d60652a7058773fa9428fa720eda38942f12f014
@@ -43,3 +43,7 @@ budget:
 2026-08-14T12:21:29 set stage_status=running
 2026-08-14T12:46:58 stage=s1b prd done, pipeline-check exit=0; FR-1~FR-7(全P0)+8条非目标+3条开放问题;上一轮PM agent因stream watchdog超时failed(已产出问题陈述节),重派后顺利补完
 2026-08-14T12:46:58 set stage_status=done
+2026-08-14T12:47:01 set stage=s2a
+2026-08-14T12:47:01 set stage_status=running
+2026-08-14T13:09:54 stage=s2a design+contract done,出口判据主会话复跑确认:pipeline-check design exit=0,gen-contract --dry-run exit=10(partial,C-FR7-3 manual,预期内);6条ADR;清理s2a验证产生的3条探针记忆(mem_mssh0sw5/mem_mssh14q3/mem_mssh2grz已删);核心待拍板项已记act_msshmgwu(FR-7改的.mcp.json可能非客户端实际加载那份,不阻塞s2b,阻塞s3/s4落地FR-7前);次要跟进已记act_msshmki7(agent-mem CLI补agentId,repo外后续排期);R-2(gate全量测试基线本身12条红,与本次无关)已在design.md记录方向,s5前处置,不阻塞当前阶段
+2026-08-14T13:09:54 set stage_status=done
