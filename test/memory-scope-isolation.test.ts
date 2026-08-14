@@ -7,6 +7,7 @@ vi.mock("../src/logger.js", () => ({
 import { getAllTools } from "../src/mcp/tools-registry.js";
 import { memoryToObservation } from "../src/state/memory-utils.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
+import { registerMcpEndpoints } from "../src/mcp/server.js";
 import type { Memory } from "../src/types.js";
 
 // Shared mock scaffolding for this file (照抄 test/mcp-resources.test.ts:10-66),
@@ -116,6 +117,57 @@ describe("FR-3", () => {
     const tool = getAllTools().find((t) => t.name === "memory_save");
     expect(tool!.inputSchema.required).toEqual(["content"]);
     expect(getAllTools().length).toBe(54);
+  });
+});
+
+describe("FR-4", () => {
+  let sdk: ReturnType<typeof mockSdk>;
+  let kv: ReturnType<typeof mockKV>;
+
+  beforeEach(() => {
+    sdk = mockSdk();
+    kv = mockKV();
+    registerMcpEndpoints(sdk as never, kv as never);
+  });
+
+  it("FR-4 POST /agentmemory/mcp/call memory_save forwards args.agentId into the mem::remember payload", async () => {
+    let capturedPayload: unknown;
+    sdk.overrideTrigger("mem::remember", (payload: unknown) => {
+      capturedPayload = payload;
+      return { id: "mem_1" };
+    });
+    const fn = sdk.getFunction("mcp::tools::call")!;
+    const res = await fn(
+      makeReq({
+        name: "memory_save",
+        arguments: { content: "hello", agentId: "a1", project: "worker-config" },
+      }),
+    );
+    expect(res.status_code).toBe(200);
+    expect((capturedPayload as { agentId?: string }).agentId).toBe("a1");
+    expect((capturedPayload as { project?: string }).project).toBe(
+      "worker-config",
+    );
+  });
+
+  it("FR-4 POST /agentmemory/mcp/call memory_save omits agentId from the payload when not provided, leaving project transparency unaffected", async () => {
+    let capturedPayload: unknown;
+    sdk.overrideTrigger("mem::remember", (payload: unknown) => {
+      capturedPayload = payload;
+      return { id: "mem_1" };
+    });
+    const fn = sdk.getFunction("mcp::tools::call")!;
+    const res = await fn(
+      makeReq({
+        name: "memory_save",
+        arguments: { content: "hello", project: "worker-config" },
+      }),
+    );
+    expect(res.status_code).toBe(200);
+    expect("agentId" in (capturedPayload as object)).toBe(false);
+    expect((capturedPayload as { project?: string }).project).toBe(
+      "worker-config",
+    );
   });
 });
 
