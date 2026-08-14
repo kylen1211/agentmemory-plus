@@ -39,7 +39,7 @@
 
 - systemd:`ExecStart` 与 `ExecStopPost` 都指向 nvm 全局包 `~/.nvm/versions/node/v24.18.0/lib/node_modules/@agentmemory/agentmemory/dist/cli.mjs`(`systemctl --user show` 实测);服务 active,`/agentmemory/livez` 返回 200。
 - `~/.config/agentmemory/service.env` 无 `AGENT_ID` → `getAgentId()` 兜底恒 `undefined`,补丁后 agentId 只能来自请求,不会被服务端环境污染。
-- MCP stdio 侧:本会话实际在跑的 server 进程为 `npm exec @agentmemory/mcp`(pid 1774621,父进程即 claude 本身,cwd `/home/ky/worker-config`)。**它不是从本仓库 `plugin/.mcp.json` 起的**——已安装插件缓存 `/home/ky/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/.mcp.json` 是同样内容的另一份,且 `~/.claude/settings.json` 的 `enabledPlugins` 与 `installed_plugins.json` 都指向该缓存目录。详见风险 R-3。
+- MCP stdio 侧:本会话实际在跑的 server 进程为 `npm exec @agentmemory/mcp`(pid 1774621,父进程即 claude 本身,cwd `/home/ky/worker-config`)。**它不是从本仓库 `plugin/.mcp.json` 起的**——已安装插件缓存 `/home/ky/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/.mcp.json` 是同样内容的另一份(实测 `diff` 一致,是真实文件不是软链),且 `~/.claude/settings.json` 的 `enabledPlugins` 与 `installed_plugins.json` 都指向该缓存目录。[s2b 呈批复核实测] `~/.claude/plugins/known_marketplaces.json` 里 `agentmemory` 的 marketplace source 是 `directory` 型、path 直指本仓库(`/home/ky/git/source-project/agentmemory`),缓存目录 `0.9.28` 即安装时对仓库 `plugin/` 的一次拷贝(`installed_plugins.json` 记 `gitCommitSha=d60652a`)。用户已拍板 **FR-7 两份都改**,见 ADR-2 与风险 R-3。
 - 下游消费者:`agent-mem`(`~/git/config-globle/skills/summer-agentmemory-scope/scripts/agentmemory-agent.sh`,repo 外)的 `save` 分支只发 `{content,type,concepts}`,**不发 agentId**,脚本头部注释明确写着"传了也会被服务端静默丢弃"。本次修完写侧后,该脚本仍需另行改动才能真正打上 scope,不在本次范围。详见风险 R-5。
 
 ### 5. preflight 证据块:D10 依赖的构建链路是否真能跑(坑库 P6)
@@ -77,12 +77,16 @@
 - **被否 ③(覆盖全局包目录)**:破坏性覆盖,原始文件无处可回;且与 npx 缓存覆盖同类,下次 `npm i -g` 或版本更新会静默冲掉,失效时无提示。
 - **代价**:此后改 `src/**` 必须重新 `npm run build` 才对 worker 生效(不再是"装个新版本"的心智);工作树的 `dist/` 与 `node_modules/` 升格为生产依赖,删不得、`git clean -xdf` 不得;工作树切分支会直接改变生产行为。回滚成本:改回两行 + `daemon-reload` + `restart`,无其它状态需要还原。
 
-### ADR-2 | MCP stdio 补丁生效方式:改 mcp 配置指向构建产物,而非手工覆盖 npx 缓存
+### ADR-2 | MCP stdio 补丁生效方式:改 mcp 配置指向构建产物(非覆盖 npx 缓存),且仓库与插件缓存**两份配置同改**
 
-- **背景**:`plugin/.mcp.json` 以 `npx -y @agentmemory/mcp` 起 stdio server(FR-2 补丁的运行载体)。候选:①把 `command`/`args` 改成 `node <worktree>/dist/standalone.mjs`;②手工覆盖 npx 缓存目录里的 `standalone.mjs`。
-- **决定**:选 ①(用户第二轮拍板),与 ADR-1 对 systemd 的做法同构。
+- **背景**:`plugin/.mcp.json` 以 `npx -y @agentmemory/mcp` 起 stdio server(FR-2 补丁的运行载体)。两个相互独立的问题:**怎么改**——候选 ①把 `command`/`args` 改成 `node <worktree>/dist/standalone.mjs`;②手工覆盖 npx 缓存目录里的 `standalone.mjs`。**改哪份**——候选 ⓐ只改仓库 `plugin/.mcp.json`(PRD FR-7 原文);ⓑ只改客户端实际加载的插件缓存 `~/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/.mcp.json`;ⓒ两份都改。
+- **决定**:方式选 ①(用户第二轮拍板),与 ADR-1 对 systemd 的做法同构;**作用对象选 ⓒ 两份都改(用户 s2b 呈批拍板,原话:"两份都改")**——两份的 `command`/`args` 同步切到 `node /home/ky/git/source-project/agentmemory/dist/standalone.mjs`,内容保持一致,`env` 三项不动。
 - **被否 ②(覆盖 npx 缓存)**:facts.md F6 已用 npm 11.16.0 自带 `libnpmexec/lib/index.js` 源码取证——缓存新鲜度判定依据是 `package-lock.json` 的 tarball `resolved` 与 registry manifest `_resolved` 是否相等(78-83 行),**与文件内容、mtime 无关**;而 `@agentmemory/mcp` 这种不带版本号的 spec 命中 `npxByNameOnly` 分支,每次都以 `preferOnline: true` 联网拉 manifest(26-37 行,该标志写在 `...flatOptions` 之后,用户侧 `--prefer-offline` 覆盖不掉)。结论:**registry 上 `@agentmemory/mcp` 一发新版就会 reify、手工补丁被静默冲掉且无任何提示**;当前 registry latest 是 0.9.28,而 origin/main 已有 v0.9.29 release commit —— 失效是"何时"而非"是否"的问题。另有路径陷阱:待覆盖文件不在 `@agentmemory/mcp` 包内(该包只有 418 字节的 `bin.mjs`),真实目标在传递依赖 `@agentmemory/agentmemory/dist/standalone.mjs` 下,取证一度记错层级。
-- **代价**:mcp 配置里出现本机绝对路径,该文件同时是要发布的插件配置(见风险 R-3,涉及"改哪一份"的开放项);同样需要"改了 src 就要重新 build"。回滚:改回 `npx -y @agentmemory/mcp`。
+- **被否 ⓐ(只改仓库那份)**:客户端当下加载的是插件缓存那份(`enabledPlugins` + `installed_plugins.json` 双向指向,实测),只改仓库 → 重连后跑的仍是 `npx` 拉的 0.9.28 旧产物,FR-7 的 Then("一次真实 `memory_save` 可观察到 agentId")永远达不成,而只看配置的 `C-FR7-1` 还会绿——正是坑库 P28 那类"配置改了、运行没变"的假绿。
+- **被否 ⓑ(只改缓存那份)**:缓存目录是仓库 `plugin/` 的一次拷贝(marketplace source 为 `directory` 型直指本仓库,实测),且路径按版本号分目录。只改缓存 → 下次 `/plugin` 更新、或版本号一变(新建 `.../0.9.29/` 目录)就以仓库里的旧内容重新铺开,补丁被静默冲回 `npx`,与被否的 ②(覆盖 npx 缓存)是同一种失效模式。
+- **两份都改的性质**:缓存那份让改动**当下生效**,仓库那份让改动**在下次插件更新后仍然生效**(更新即从仓库重新拷贝);两个时间面各占一份,缺一份就在某个时间点失效。
+- **代价**:①两份 mcp 配置里都出现本机绝对路径,而仓库那份**随插件一起对外发布**,本机路径对其他使用者无意义——发布前必须改回,这条长期约束记在 R-3,本次不做自动化拦截;②缓存那份属 `~/.claude` 用户配置域,不受版本控制、改动无 diff 可查、插件更新会覆盖,只能靠 `C-FR7-1b` 每轮 gate 复核它是否仍在位;③两份文件从此要人肉保持一致,漂移了不会有人报错(`C-FR7-1b` 顺带断言两份 command/args 一致,把漂移变成红);④与 ADR-1 同样需要"改了 `src/**` 就得重新 `npm run build`"。
+- **回滚**:两份各自把 `command`/`args` 改回 `"npx"` / `["-y","@agentmemory/mcp"]` 即可,无其它状态需还原(缓存那份也可用重装插件覆盖回去);两份互不依赖、可单独回滚,但**只回滚一份会造成发布态与运行态不一致**,要么同回、要么在 R-3 补一行说明。
 
 ### ADR-3 | 验收用例的落点:FR-2 钉死在 proxy 文件,其余四条集中到一个新建测试文件
 
@@ -167,7 +171,7 @@
 |---|---|---|---|
 | B0 | (FR-6/FR-7 共同前置) | 在**主工作树**执行 `npm run build`,确认 `dist/cli.mjs` 与 `dist/standalone.mjs` 是含补丁的新产物 | 由 B1/B2 的用例间接判定 |
 | B1 | FR-6 | 备份 → 改 `~/.config/systemd/user/agentmemory.service` 的 `ExecStart` 与 `ExecStopPost` **两行** → `daemon-reload` → `restart` → 探活 | C-FR6-1、C-FR6-2 |
-| B2 | FR-7 | 备份 → 改 `plugin/.mcp.json` 的 `command`/`args` → 客户端重连 | C-FR7-1、C-FR7-2、C-FR7-3(manual) |
+| B2 | FR-7 | 备份**两份**配置 → 把仓库 `plugin/.mcp.json` 与插件缓存 `~/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/.mcp.json` 的 `command`/`args` 同步改为 `node /home/ky/git/source-project/agentmemory/dist/standalone.mjs`(`env` 三项不动,两份内容保持一致)→ 客户端重启/重连 | C-FR7-1、C-FR7-1b、C-FR7-2、C-FR7-3(manual) |
 
 ### 依赖顺序(DAG)与理由
 
@@ -184,14 +188,15 @@ A2(FR-1)  A3(FR-5)   [与 A1 无依赖,可任意先后]
 - **B0 是硬前置且不可省**:`dist/` 被 `.gitignore` 排除、不随代码合并自动更新,改完 `src/**` 不重新 build,B1/B2 切过去的仍是旧产物(这正是 C-FR6-2 / C-FR7-2 要抓的"配置改了但代码没生效")。
 - **实现约束(facts.md F3)**:`deps.neverBundle` 让产物运行时依赖同工作树 `node_modules/`。**D10 之后不得删除主工作树的 `node_modules/` 与 `dist/`**,也不得对该工作树 `git clean -xdf`;任何清理都会让 worker 在下次重启时起不来。
 - **构建副作用(build-spike 附录)**:`npm run build` 会给 `plugin/scripts/*.mjs` 等加可执行权限位,产生与本次无关的 `git status` 噪音,B0 完成后核对并复原,不要混进补丁 diff。
-- **写前备份(坑库 P34)**:B1/B2 都是对既有配置文件的覆盖式修改,**先备份原文件、再写**;需要人确认的场合,确认动作排在写入之前,不做"先改了再拿 diff 给人看"。
+- **写前备份(坑库 P34)**:B1/B2 都是对既有配置文件的覆盖式修改,**先备份原文件、再写**;需要人确认的场合,确认动作排在写入之前,不做"先改了再拿 diff 给人看"。B2 要备份的是**两个**文件,备份路径分开、不要互相覆盖。
+- **B2 跨域改动的边界(用户已拍板,ADR-2)**:插件缓存那份位于 `~/.claude` 用户配置域、在仓库之外,不进本次 git diff、也不进 review 的代码面;它属于**环境操作**,由 devops-engineer 执行并在 deploy-runbook.md 的部署/回滚步骤里逐条留痕(含备份路径与回滚命令)。两份文件的 `command`/`args` 必须逐字一致,由 `C-FR7-1b` 机器判定。
 
 ## 风险与难逆点
 
 - **R-1 | 重启窗口写入丢失(已接受,不加防护)**:B1 那次 `systemctl restart` 会让 worker 短暂不可用,P9 的约 15 秒缓冲期写入可能丢失。用户 intake Q6 已拍板不设安静窗口、不提前告知子 agent、按现有重试机制处理。执行时机(实现完即做 / 排到部署阶段统一做)仍是 PRD 开放问题 2,由主会话在进 s3 前定。
 - **R-2 | gate 的全量测试项在本机基线即红,会 fail-closed 拦住 s5**:实测 12 条失败(5 文件),其中 11 条源于 `~/.agentmemory/.env` 泄漏进测试进程(`HOME` 隔离后消失)、1 条是 HEAD 上 `consistency.test.ts` 的 README 端点计数漂移,**全部与本次改动无关**。需要主会话在 s5 前择一处置:给 gate 设带 `HOME` 隔离的测试命令、或把这 12 条登记为已知基线失败。本节只报告,不擅自改 gate 配置。
-- **R-3 | FR-7 改的那份 `.mcp.json` 可能不是客户端实际加载的那份(P28 类风险,待拍板)**:实测本会话在跑的 stdio server 是 `npm exec @agentmemory/mcp`(pid 1774621,父进程为 claude),而已安装插件缓存 `~/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/.mcp.json` 与 `~/.claude/settings.json` 的 `enabledPlugins` 指向该缓存目录 —— 即**客户端读的很可能是插件缓存那一份,不是本仓库的 `plugin/.mcp.json`**(证据等级:配置级 + 进程级,尚无"改哪份文件会改变客户端行为"的端到端证明)。PRD FR-7 只写了仓库内那份。后果:只改仓库文件,FR-7 的 Then("一次真实 `memory_save` 调用可观察到 agentId")无法达成,而 `C-FR7-1`/`C-FR7-2` 仍会绿(它们只证明配置与制品正确)。**需要主会话/用户拍板**:是否同时改插件缓存那份(属 `~/.claude` 域的用户配置改动,且插件更新会覆盖)、或改用用户级 mcp 配置另起一个 server 名。`C-FR7-3` 已按 manual 挂着这条,不阻塞其余用例。
+- **R-3 | FR-7 的作用对象:两份 `.mcp.json`(已拍板,不再是开放项)**:实测本会话在跑的 stdio server 是 `npm exec @agentmemory/mcp`(pid 1774621,父进程为 claude),而 `~/.claude/settings.json` 的 `enabledPlugins` 与 `installed_plugins.json` 都指向已安装插件缓存 `~/.claude/plugins/cache/agentmemory/agentmemory/0.9.28/`,即**客户端读的是插件缓存那一份,不是本仓库的 `plugin/.mcp.json`**(证据等级:配置级 + 进程级 + 内容级 `diff`,仍无"改哪份文件会改变客户端行为"的端到端证明——该证明只能由 `C-FR7-3` 人工重连后取得)。**用户 s2b 呈批已拍板:两份都改**——仓库 `plugin/.mcp.json` 与插件缓存那份的 `command`/`args` 均切到工作树 `dist/standalone.mjs`,理由与被否方案见 ADR-2,任务落在 B2,机检落在 `C-FR7-1`(仓库)+ `C-FR7-1b`(缓存 + 两份一致性)。**拍板后仍留的两条约束**:①仓库那份是对外发布的插件配置,含本机绝对路径,**发布前必须改回 `npx -y @agentmemory/mcp`**,本次不做自动拦截,列为长期注意事项;②缓存那份不受版本控制,`/plugin` 更新或插件版本号变化(新建 `.../<新版本>/` 目录)会把它重新铺成仓库里的内容——那时仓库那份若已改好则自动延续,若已按①改回则 FR-7 失效需重做,`C-FR7-1b` 会在下一轮 gate 判红暴露。`C-FR7-3` 仍为 manual(脚本无法驱动宿主客户端重连),覆盖对象扩展为两份文件。
 - **R-4 | 探针用例向真实记忆库写数据**:`C-FR6-2`/`C-FR7-2` 每轮各写一条真实记忆(`concepts` 含 `pipeline-probe`)。这是 PRD FR-6 认可的核验方式,且必须用一次性 agentId 才能防"上一轮记录让本轮假绿"。代价是库里逐轮累积探针记录;清理属破坏性操作,须先列清单后确认再删,不进自动化。
 - **R-5 | 修完写侧,日常主写入方仍不带 scope(业务收益未闭环)**:`agent-mem` 包装脚本(config-globle 仓,repo 外)的 save 分支不发 `agentId`,只把 agent 名塞进 `concepts` 做客户端过滤。本次七条 FR 全绿之后,子 agent 经 `agent-mem save` 写入的记忆**依然没有 agentId**,PRD 问题陈述里"多 agent 记忆相互污染"的实际收益要等那个脚本另行改动才兑现。不在本次范围,提请主会话作为后续变更登记。
 - **R-6 | 生产依赖被绑到开发工作树(需要长期记住的耦合)**:D10 之后,用户日常在用的 worker 由一个开发工作树的 `dist/` + `node_modules/` 支撑,工作树切分支/清理/删目录都会直接影响生产服务。这是可回退的(改回两行路径),但**易被遗忘**,建议在 deploy-runbook.md 里显式写死这条约束。
-- **难逆点(逐条判定)**:本次**没有真正难逆的决策**——五处代码补丁是 additive optional 可直接 revert;ADR-1/ADR-2 两条环境切换各自"改两行、改回两行"即可回滚,不涉及包目录或缓存的破坏性覆盖(这正是两条 ADR 否掉 npm link / 覆盖全局包 / 覆盖 npx 缓存的核心理由)。唯一不可撤销的是 R-4 那些**已写入真实记忆库的探针记录**(只能事后手工清理),以及重启窗口内**已丢失的写入**(R-1,不可追回);两者都已被显式接受。
+- **难逆点(逐条判定)**:本次**没有真正难逆的决策**——五处代码补丁是 additive optional 可直接 revert;ADR-1/ADR-2 两条环境切换各自"改两行、改回两行"即可回滚,不涉及包目录或缓存的破坏性覆盖(这正是两条 ADR 否掉 npm link / 覆盖全局包 / 覆盖 npx 缓存的核心理由)。ADR-2 拍板后要改的是**两份** `.mcp.json`,回滚同样是两份各改回 `npx -y @agentmemory/mcp`(缓存那份另有"重装插件"这条等效退路);其中插件缓存那份在仓库之外、不受版本控制,回滚依赖 B2 留下的备份与 deploy-runbook 记录,这是本次唯一"可逆但依赖留痕"的改动。唯一不可撤销的是 R-4 那些**已写入真实记忆库的探针记录**(只能事后手工清理),以及重启窗口内**已丢失的写入**(R-1,不可追回);两者都已被显式接受。

@@ -136,20 +136,29 @@ cases:
 
 ## FR-7 | MCP stdio 主路径切到工作树构建产物
 
-三条,同样按 P28 拆"配置 / 制品真跑 / 客户端真连":
-- `C-FR7-1` 配置层:`plugin/.mcp.json` 的 command/args 指向工作树 `dist/standalone.mjs` 且该产物存在;
-- `C-FR7-2` 制品层:**照 `plugin/.mcp.json` 里写的 command/args 原样起进程**,走真实 MCP stdio 协议(initialize → notifications/initialized → tools/call memory_save),再按一次性 agentId 从 worker 读回计数。守卫:command 必须是 `node` 且 args 命中工作树产物才执行,避免误触发 `npx` 联网安装;
-- `C-FR7-3` 客户端层:真实 MCP 客户端重连后的观察,**标 `manual`**——脚本无法驱动宿主客户端重连,且"客户端实际加载的是哪一份 mcp 配置"是 design.md 风险 R-3 里待主会话拍板的开放项。
+**作用对象已拍板为两份文件**(用户 s2b 呈批,design.md ADR-2 / R-3):仓库 `plugin/.mcp.json`(发布态、受版本控制)与插件缓存里客户端实际加载的那份(运行态、`~/.claude` 域、不受版本控制),两者 command/args 必须逐字一致。四条用例按 P28 拆"配置(两份)/ 制品真跑 / 客户端真连":
+- `C-FR7-1` 配置层·仓库:`plugin/.mcp.json` 的 command/args 指向工作树 `dist/standalone.mjs` 且该产物存在;
+- `C-FR7-1b` 配置层·运行态:**客户端实际加载的那份** `.mcp.json` 同样指向工作树产物,且与仓库那份 command/args 完全一致。目标路径从 `~/.claude/plugins/installed_plugins.json` 的 `agentmemory@agentmemory` → `installPath` 动态取(而非写死 0.9.28 目录),插件版本升级换目录后本用例仍指向真正被加载的那份;取不到时回落到 `~/.claude/plugins/cache/agentmemory/agentmemory/0.9.28`。这条同时是"插件更新把缓存那份铺回旧内容"的探测器(ADR-2 代价②);
+- `C-FR7-2` 制品层:**照 `plugin/.mcp.json` 里写的 command/args 原样起进程**,走真实 MCP stdio 协议(initialize → notifications/initialized → tools/call memory_save),再按一次性 agentId 从 worker 读回计数。守卫:command 必须是 `node` 且 args 命中工作树产物才执行,避免误触发 `npx` 联网安装。用仓库那份起进程即可覆盖两份——`C-FR7-1b` 已把"两份一致"钉成硬判据,不一致时先在 1b 判红;
+- `C-FR7-3` 客户端层:真实 MCP 客户端重启/重连后的观察,**标 `manual`**——脚本无法驱动宿主客户端重连。性质不变,覆盖对象扩展为两份文件(既确认重连后跑的是工作树产物,也确认两份文件在观察时点都仍在位)。
 
 ```yaml
 cases:
   - id: C-FR7-1
     fr: FR-7
     owner: devops-engineer
-    desc: plugin/.mcp.json 以 node 直接执行工作树 dist/standalone.mjs,且该产物存在
+    desc: 仓库 plugin/.mcp.json 以 node 直接执行工作树 dist/standalone.mjs,且该产物存在
     red_anchor: s2a 现场实跑 exit 1,输出 command 非 node(实际为 npx)
     cmd: |-
       bash -c 'set -uo pipefail; R=/home/ky/git/source-project/agentmemory; T=$R/dist/standalone.mjs; C=$(jq -r ".mcpServers.agentmemory.command" $R/plugin/.mcp.json); A=$(jq -r ".mcpServers.agentmemory.args | join(\" \")" $R/plugin/.mcp.json); [ "$C" = node ] || { echo "command 非 node: $C"; exit 1; }; case "$A" in *"$T"*) ;; *) echo "args 未指向工作树产物: $A"; exit 1;; esac; [ -f "$T" ] || { echo "构建产物不存在: $T"; exit 1; }'
+    expect_exit: 0
+  - id: C-FR7-1b
+    fr: FR-7
+    owner: devops-engineer
+    desc: 客户端实际加载的那份 .mcp.json(installed_plugins.json 指向的插件缓存)同样以 node 执行工作树 dist/standalone.mjs,且与仓库那份 command/args 逐字一致
+    red_anchor: s2a/s2b 现场实测缓存那份内容与仓库同为 npx -y @agentmemory/mcp,command 非 node,判红
+    cmd: |-
+      bash -c 'set -uo pipefail; R=/home/ky/git/source-project/agentmemory; T=$R/dist/standalone.mjs; I=$HOME/.claude/plugins/installed_plugins.json; P=$(jq -r ".plugins[\"agentmemory@agentmemory\"][0].installPath // empty" "$I" 2>/dev/null); [ -n "$P" ] || P=$HOME/.claude/plugins/cache/agentmemory/agentmemory/0.9.28; M=$P/.mcp.json; [ -f "$M" ] || { echo "客户端加载的 mcp 配置不存在: $M"; exit 1; }; C=$(jq -r ".mcpServers.agentmemory.command" "$M"); A=$(jq -r ".mcpServers.agentmemory.args | join(\" \")" "$M"); [ "$C" = node ] || { echo "缓存那份 command 非 node: $C ($M)"; exit 1; }; case "$A" in *"$T"*) ;; *) echo "缓存那份 args 未指向工作树产物: $A"; exit 1;; esac; [ -f "$T" ] || { echo "构建产物不存在: $T"; exit 1; }; RC=$(jq -r ".mcpServers.agentmemory.command" $R/plugin/.mcp.json); RA=$(jq -r ".mcpServers.agentmemory.args | join(\" \")" $R/plugin/.mcp.json); { [ "$C" = "$RC" ] && [ "$A" = "$RA" ]; } || { echo "两份配置不一致: 缓存[$C $A] 仓库[$RC $RA]"; exit 1; }'
     expect_exit: 0
   - id: C-FR7-2
     fr: FR-7
@@ -163,7 +172,7 @@ cases:
     fr: FR-7
     owner: devops-engineer
     manual: true
-    reason: 需人工重启或重连宿主 MCP 客户端后发一次 memory_save 并核验落库带 agentId;且客户端实际加载的那份 mcp 配置文件待主会话拍板(design.md 风险 R-3),脚本无法确定性驱动
+    reason: 需人工重启或重连宿主 MCP 客户端后发一次 memory_save 并核验落库记录带 agentId,脚本无法确定性驱动宿主客户端重连;覆盖对象为已拍板的两份 .mcp.json(仓库 plugin/.mcp.json + installed_plugins.json 指向的插件缓存那份,design.md ADR-2/R-3),观察时点须确认两份都仍指向工作树 dist/standalone.mjs
 ```
 
 ## 回归判据(既有资产不许被本次改动打坏)
@@ -186,4 +195,5 @@ cases:
 ## 副作用与清理(执行前须知)
 
 - `C-FR6-2`/`C-FR7-2` 每跑一次向**真实记忆库**写入一条探针记录(`concepts` 含 `pipeline-probe`,`agentId` 形如 `probe-msi-*`)。这是 PRD FR-6 明确认可的核验方式("可发一次真实 memory_save 请求核验落库记录"),代价是每轮 gate 留 2 条探针记录。清理是可选且属破坏性操作:要清理须先按 `concepts=pipeline-probe` 列出待删清单交人确认,**确认在删除之前**(坑库 P34);本清单不内置任何删除动作。
+- `C-FR7-1b` 读 `~/.claude` 下的用户配置(只读,不写);该目录内容不受本仓库版本控制,插件更新会覆盖 —— 判红时先分辨是"实现没做"还是"做了之后被插件更新冲回"(design.md ADR-2 代价②),两者处置不同(前者回派 B2,后者重做一次 B2 的缓存侧写入)。
 - `C-FR6-1`/`C-FR6-2`/`C-FR7-2` 依赖 systemd user 会话与本机 3111 端口 worker;在无 systemd 或 worker 未起的环境下必红,属**环境不满足**而非实现缺陷,由 qa-tester 在 test-report.md 里区分标注。
