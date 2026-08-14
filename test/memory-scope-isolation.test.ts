@@ -6,6 +6,7 @@ vi.mock("../src/logger.js", () => ({
 
 import { getAllTools } from "../src/mcp/tools-registry.js";
 import { memoryToObservation } from "../src/state/memory-utils.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
 import type { Memory } from "../src/types.js";
 
 // Shared mock scaffolding for this file (照抄 test/mcp-resources.test.ts:10-66),
@@ -115,5 +116,66 @@ describe("FR-3", () => {
     const tool = getAllTools().find((t) => t.name === "memory_save");
     expect(tool!.inputSchema.required).toEqual(["content"]);
     expect(getAllTools().length).toBe(54);
+  });
+});
+
+describe("FR-5", () => {
+  let sdk: ReturnType<typeof mockSdk>;
+  let kv: ReturnType<typeof mockKV>;
+
+  beforeEach(() => {
+    sdk = mockSdk();
+    kv = mockKV();
+    registerApiTriggers(sdk as never, kv as never);
+  });
+
+  it("FR-5 api::remember passes a normal-length agentId through to mem::remember", async () => {
+    let capturedPayload: unknown;
+    sdk.overrideTrigger("mem::remember", async (payload: unknown) => {
+      capturedPayload = payload;
+      return { id: "mem_1" };
+    });
+    const fn = sdk.getFunction("api::remember")!;
+    const res = await fn(makeReq({ content: "hello", agentId: "pm-agent" }));
+    expect(res.status_code).toBe(201);
+    expect((capturedPayload as { agentId?: string }).agentId).toBe("pm-agent");
+  });
+
+  it("FR-5 api::remember truncates an agentId over 128 chars to exactly 128", async () => {
+    let capturedPayload: unknown;
+    sdk.overrideTrigger("mem::remember", async (payload: unknown) => {
+      capturedPayload = payload;
+      return { id: "mem_1" };
+    });
+    const fn = sdk.getFunction("api::remember")!;
+    const longAgentId = "a".repeat(150);
+    const res = await fn(makeReq({ content: "hello", agentId: longAgentId }));
+    expect(res.status_code).toBe(201);
+    const sentAgentId = (capturedPayload as { agentId?: string }).agentId;
+    expect(sentAgentId).toBe("a".repeat(128));
+    expect(sentAgentId?.length).toBe(128);
+  });
+
+  it("FR-5 api::remember leaves agentId out of the payload when missing or empty, without erroring", async () => {
+    let capturedMissing: unknown;
+    let capturedEmpty: unknown;
+    sdk.overrideTrigger("mem::remember", async (payload: unknown) => {
+      capturedMissing = payload;
+      return { id: "mem_1" };
+    });
+    const fn = sdk.getFunction("api::remember")!;
+    const resMissing = await fn(makeReq({ content: "hello" }));
+    expect(resMissing.status_code).toBe(201);
+    expect((capturedMissing as { agentId?: string }).agentId).toBeUndefined();
+    expect("agentId" in (capturedMissing as object)).toBe(false);
+
+    sdk.overrideTrigger("mem::remember", async (payload: unknown) => {
+      capturedEmpty = payload;
+      return { id: "mem_1" };
+    });
+    const resEmpty = await fn(makeReq({ content: "hello", agentId: "   " }));
+    expect(resEmpty.status_code).toBe(201);
+    expect((capturedEmpty as { agentId?: string }).agentId).toBeUndefined();
+    expect("agentId" in (capturedEmpty as object)).toBe(false);
   });
 });
