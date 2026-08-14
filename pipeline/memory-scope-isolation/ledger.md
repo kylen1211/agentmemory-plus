@@ -2,7 +2,7 @@
 change_id: memory-scope-isolation
 grade: L3
 contract_tier: cases
-stage: s3
+stage: s4
 stage_status: running
 pending: PRD/设计/契约/任务卡待批(一次呈批,s2b step4);核心待拍板项见 act_msshmgwu(FR-7 mcp配置实际生效路径未证实);次要跟进见 act_msshmki7(agent-mem CLI补agentId,repo外)
 base_commit: d60652a7058773fa9428fa720eda38942f12f014
@@ -28,7 +28,33 @@ approvals:
   at: 2026-08-14 13:40:52
   hash: 08f7a619fcb8591ca029789d6e61a288e3fcbd0e5f0eb95a75c1262ce83563cd
 worktrees: []
-generated: []
+generated:
+- path: pipeline/memory-scope-isolation/generated/run-cases.sh
+  hash: 27bdfa8ab60e00b2677f1c0a55b6940e2eec088f3436a15cfc465aa47b859f77
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR1-1.sh
+  hash: 2e49c80e12f1e5d5c4b0c2cae81e8f6d25b925768e1528a919d74fa330f95f62
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR2-1.sh
+  hash: 116949b856776e9fff7d2242798a6a6efacb6d342d5ffc6adb2241e42091502d
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR3-1.sh
+  hash: 8e415329a2e756aadceca8603f16af38cdcb4a927ed12637fb320eb17ee1c482
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR3-2.sh
+  hash: 1f184ab46a088ced8ab6c7286e235a6dcdd04c881c4fb1b54f4ec55867e7a448
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR4-1.sh
+  hash: 6345ac28041460977dc2c1386530726fe86a77cedacc17251703d4acf414cdca
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR5-1.sh
+  hash: ba624911e2edc882ecf2ab31147856373cd66b17e103f6a5c9aef7c91900d805
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR6-1.sh
+  hash: d3c0087af2cca7994d745a26a866981354e352a43b0df61efb15c0065e8d0986
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR6-2.sh
+  hash: a81143b45268afef7ddf4033a262d4cef3406e3a80f72d2ef231e55d5b43d721
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR7-1.sh
+  hash: 543522b9ec1b29cd569e9c24c658365c16ace4f8306be0b76d756bd6de041c6a
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR7-1b.sh
+  hash: 16651389b5a33a6e9b3b0ab0ca7581f61b627281d13f04681e180443a2bb606c
+- path: pipeline/memory-scope-isolation/generated/cases/C-FR7-2.sh
+  hash: e268e9b7b5b30a6911064b083ed714c134007f3f0f3677f5fbb8b919a283f69d
+- path: pipeline/memory-scope-isolation/generated/cases/C-REG-1.sh
+  hash: b61694fa6f915c5301bb6f6bc48053d7f435f499983123c4da81d89c26f75de6
 uncovered:
 - id: C-FR7-3
   reason: 需人工重启/重连宿主MCP客户端观察;已拍板(design.md R-3)FR-7目标扩为仓库plugin/.mcp.json与客户端实际加载的插件缓存两份同改,C-FR7-1b已作为可执行判据覆盖两份内容一致性,本条manual仅覆盖'实测重启后agentId真正生效'这一步
@@ -79,3 +105,20 @@ budget:
 2026-08-14T13:41:03 2026-08-14T13:41:03 stage=s2b 一次呈批冻结完成:用户批准+R-3已拍板(两份都改)落地,排干闸门②-⑤最终复核 gen-contract exit=10(partial,C-FR7-3)/pipeline-check tasks exit=0;frozen.prd/contract/tasks 三级 hash 与 approvals 均已记账
 2026-08-14T13:41:03 set stage=s3
 2026-08-14T13:41:03 set stage_status=running
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/run-cases.sh, hash: 27bdfa8ab60e00b2677f1c0a55b6940e2eec088f3436a15cfc465aa47b859f77}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR1-1.sh, hash: 2e49c80e12f1e5d5c4b0c2cae81e8f6d25b925768e1528a919d74fa330f95f62}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR2-1.sh, hash: 116949b856776e9fff7d2242798a6a6efacb6d342d5ffc6adb2241e42091502d}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR3-1.sh, hash: 8e415329a2e756aadceca8603f16af38cdcb4a927ed12637fb320eb17ee1c482}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR3-2.sh, hash: 1f184ab46a088ced8ab6c7286e235a6dcdd04c881c4fb1b54f4ec55867e7a448}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR4-1.sh, hash: 6345ac28041460977dc2c1386530726fe86a77cedacc17251703d4acf414cdca}
+2026-08-14T13:49:34 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR5-1.sh, hash: ba624911e2edc882ecf2ab31147856373cd66b17e103f6a5c9aef7c91900d805}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR6-1.sh, hash: d3c0087af2cca7994d745a26a866981354e352a43b0df61efb15c0065e8d0986}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR6-2.sh, hash: a81143b45268afef7ddf4033a262d4cef3406e3a80f72d2ef231e55d5b43d721}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR7-1.sh, hash: 543522b9ec1b29cd569e9c24c658365c16ace4f8306be0b76d756bd6de041c6a}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR7-1b.sh, hash: 16651389b5a33a6e9b3b0ab0ca7581f61b627281d13f04681e180443a2bb606c}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-FR7-2.sh, hash: e268e9b7b5b30a6911064b083ed714c134007f3f0f3677f5fbb8b919a283f69d}
+2026-08-14T13:49:35 set generated[+]={path: pipeline/memory-scope-isolation/generated/cases/C-REG-1.sh, hash: b61694fa6f915c5301bb6f6bc48053d7f435f499983123c4da81d89c26f75de6}
+2026-08-14T13:49:46 stage=s3 生成完成:gen-contract exit=10(partial),13个生成物(1个run-cases.sh+12个用例脚本)已登记generated[];PARTIAL C-FR7-3 与 s2b 已登记的 uncovered 条目一致(预期内,manual,不重复登记),不阻塞进入 s4
+2026-08-14T13:49:46 set stage_status=done
+2026-08-14T13:49:46 set stage=s4
+2026-08-14T13:49:46 set stage_status=running
