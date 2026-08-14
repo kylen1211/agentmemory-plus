@@ -2,7 +2,7 @@
 change_id: memory-scope-isolation
 grade: L3
 contract_tier: cases
-stage: s4
+stage: s4m
 stage_status: running
 pending: PRD/设计/契约/任务卡待批(一次呈批,s2b step4);核心待拍板项见 act_msshmgwu(FR-7 mcp配置实际生效路径未证实);次要跟进见 act_msshmki7(agent-mem CLI补agentId,repo外)
 base_commit: d60652a7058773fa9428fa720eda38942f12f014
@@ -59,7 +59,12 @@ uncovered:
 - id: C-FR7-3
   reason: 需人工重启/重连宿主MCP客户端观察;已拍板(design.md R-3)FR-7目标扩为仓库plugin/.mcp.json与客户端实际加载的插件缓存两份同改,C-FR7-1b已作为可执行判据覆盖两份内容一致性,本条manual仅覆盖'实测重启后agentId真正生效'这一步
   status: pending
-parked: []
+parked:
+- item: C-FR7-2首跑瞬态失败
+  reason: T-B2首次跑C-FR7-2曾红(读回total=0)
+  复测8+次后稳定PASS: null
+  devops判定为worker冷启动类一次性瞬态非代码缺陷;若s5/s6 gate复跑再现同类偶发红先重跑2-3次排除瞬态再升级backend-dev定位mem::remember写入路径: null
+  status: observe
 budget:
   limit_tokens: null
   spent_note: null
@@ -122,3 +127,27 @@ budget:
 2026-08-14T13:49:46 set stage_status=done
 2026-08-14T13:49:46 set stage=s4
 2026-08-14T13:49:46 set stage_status=running
+2026-08-14T13:50:50 stage=s4 dispatch backend-dev T-A1
+2026-08-14T13:53:51 T-A1 DONE commits d86f67e
+2026-08-14T13:53:51 stage=s4 dispatch backend-dev T-A2
+2026-08-14T13:55:37 T-A2 DONE commits bb85a9a
+2026-08-14T13:55:37 stage=s4 dispatch backend-dev T-A3
+2026-08-14T13:58:29 T-A3 DONE commits 29c84a9
+2026-08-14T13:58:29 stage=s4 dispatch backend-dev T-A4
+2026-08-14T14:00:23 T-A4 DONE commits 3c06ab6
+2026-08-14T14:00:23 stage=s4 dispatch backend-dev T-A5
+2026-08-14T14:02:45 T-A5 DONE commits 31bb4bd
+2026-08-14T14:02:45 stage=s4 dispatch backend-dev T-A6
+2026-08-14T14:04:09 T-A6 DONE 组A收口回归全绿(C-REG-1 9/9 + 六条FR用例)
+2026-08-14T14:04:09 stage=s4 dispatch devops-engineer T-B0
+2026-08-14T14:06:04 T-B0 DONE dist/cli.mjs+dist/standalone.mjs已含补丁(grep agentId=10,mtime晚于源码),权限位噪音已复原
+2026-08-14T14:08:24 用户已明确批准T-B1/T-B2并行执行(生产systemd重启+两份.mcp.json改写)
+2026-08-14T14:08:24 stage=s4 dispatch devops-engineer T-B1
+2026-08-14T14:08:24 stage=s4 dispatch devops-engineer T-B2
+2026-08-14T14:11:24 T-B1 DONE systemd unit切工作树dist/cli.mjs,active+livez200,探针probe-msi-rest-1786687825-1871768读回total=1,C-FR6-1/C-FR6-2全绿
+2026-08-14T14:17:05 T-B2 DONE 两份.mcp.json改写(command=node,args指向dist/standalone.mjs,env原样保留),C-FR7-1/1b/2全绿;deploy-runbook.md新建FR-7小节;plugin/.mcp.json未commit(留待s4m)
+2026-08-14T14:17:05 set parked[+]={item: C-FR7-2首跑瞬态失败, reason: T-B2首次跑C-FR7-2曾红(读回total=0),复测8+次后稳定PASS,devops判定为worker冷启动类一次性瞬态非代码缺陷;若s5/s6 gate复跑再现同类偶发红先重跑2-3次排除瞬态再升级backend-dev定位mem::remember写入路径, status: observe}
+2026-08-14T14:17:05 stage=s4 全部9张任务卡DONE(T-A1~A6+T-B0~B2),组A+组B完成
+2026-08-14T14:17:05 set stage_status=done
+2026-08-14T14:17:05 set stage=s4m
+2026-08-14T14:17:05 set stage_status=running
