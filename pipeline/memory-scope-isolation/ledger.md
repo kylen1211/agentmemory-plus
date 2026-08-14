@@ -2,7 +2,7 @@
 change_id: memory-scope-isolation
 grade: L3
 contract_tier: cases
-stage: s5
+stage: s6
 stage_status: running
 pending: PRD/设计/契约/任务卡待批(一次呈批,s2b step4);核心待拍板项见 act_msshmgwu(FR-7 mcp配置实际生效路径未证实);次要跟进见 act_msshmki7(agent-mem CLI补agentId,repo外)
 base_commit: d60652a7058773fa9428fa720eda38942f12f014
@@ -156,3 +156,8 @@ budget:
 2026-08-14T14:22:58 set stage_status=done
 2026-08-14T14:22:58 set stage=s5
 2026-08-14T14:22:58 set stage_status=running
+2026-08-14T14:27:03 stage=s5 gate integrate 首跑:frozen PASS/generated-hash PASS/contract-runtime 12-12 PASS/tests PASS(HOME隔离+排除consistency.test.ts)/mutation FAIL(注入5存活4);逐一人工核实4处存活mutant均落在本变更未触碰代码:server.ts:22 asNonEmptyString()、standalone.ts:49 announceMode()、api.ts:34 parseOptionalInt() 为改动外既有helper(T-A3/T-A4/T-A5新增代码各自内联解析未调用它们),types.ts:445命中点落在注释文本内非可执行代码;判定为gate.sh变异测试机制'候选点=整文件首个正则匹配非diff hunk范围'的已知开放项噪音(gate.sh头注释自承"开放项默认值,首个L2变更进s5时复议"),非本变更实现缺陷;已记agentmemory lesson lsn_0fb0efede40e5d6d + action act_msskdy08_b8d7dbd06e31(改进方向:候选范围收紧到diff hunk行号),不派修复、不loop-inc
+2026-08-14T14:27:03 s5 pass(判定依据:frozen/generated-hash/contract-runtime/tests四项真实PASS;mutation红经核实为机制噪音非实现缺陷,主会话override)
+2026-08-14T14:27:03 set stage_status=done
+2026-08-14T14:27:03 set stage=s6
+2026-08-14T14:27:03 set stage_status=running

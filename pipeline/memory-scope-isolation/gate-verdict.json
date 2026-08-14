@@ -1,21 +1,31 @@
 {
   "pass": false,
-  "reason": "gate merge: 存在失败项: typecheck",
+  "reason": "gate integrate: 存在失败项: mutation",
   "items": [
+    {
+      "name": "frozen",
+      "pass": true,
+      "evidence": "frozen ok"
+    },
     {
       "name": "generated-hash",
       "pass": true,
       "evidence": "13 个生成物 hash 一致"
     },
     {
-      "name": "typecheck",
-      "pass": false,
-      "evidence": "[npx tsc --noEmit] exit=2 src/providers/openai.ts(12,7): error TS6133: 'DEFAULT_MODEL' is declared but its value is never read. | src/state/index-persistence.ts(64,5): error TS18046: 'candidate.chars' is of type 'unknown'. | src/triggers/api.ts(252,12): error TS6133: 'req' is declared but its value is never read. | src/triggers/api.ts(288,20): error TS2352: Conversion of type 'HookPayload' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first. |   Index signature for type 'string' is missing in type 'HookPayload'. | src/triggers/api.ts(2506,22): error TS2339: Property 'name' does not exist on type '{}'. | src/triggers/api.ts(2506,41): error TS2339: Property 'steps' does not exist on type '{}'. "
+      "name": "contract-runtime",
+      "pass": true,
+      "evidence": "exit=0 CASE C-FR5-1 PASS | CASE C-FR6-1 PASS | CASE C-FR6-2 PASS | CASE C-FR7-1b PASS | CASE C-FR7-1 PASS | CASE C-FR7-2 PASS | CASE C-REG-1 PASS | cases: 12/12 passed"
     },
     {
       "name": "tests",
       "pass": true,
       "evidence": "[HOME=/tmp/claude-1000/-home-ky-worker-config/ef69acd3-3cdd-4298-b666-a0e54341b85b/scratchpad/isolated-home npx vitest run --exclude test/integration.test.ts --exclude test/consistency.test.ts] exit=0 [agentmemory] info Context generated {\"blocks\":1,\"tokens\":55} | [agentmemory] No LLM provider key set — running zero-LLM (BM25 + on-device embeddings). Set ANTHROPIC_API_KEY (or GEMINI/OPENAI/OPENROUTER/MINIMAX) in ~/.agentmemory/.env for LLM compression and summaries. Agent-SDK fallback stays off by default to avoid a Stop-hook recursion loop; opt in with AGENTMEMORY_AUTO_COMPRESS=true + AGENTMEMORY_ALLOW_AGENT_SDK=true. | [agentmemory] No LLM provider key set — running zero-LLM (BM25 + on-device embeddings). Set ANTHROPIC_API_KEY (or GEMINI/OPENAI/OPENROUTER/MINIMAX) in ~/.agentmemory/.env for LLM compression and summaries. Agent-SDK fallback stays off by default to avoid a Stop-hook recursion loop; opt in with AGENTMEMORY_AUTO_COMPRESS=true + AGENTMEMORY_ALLOW_AGENT_SDK=true. | [agentm"
+    },
+    {
+      "name": "mutation",
+      "pass": false,
+      "evidence": "注入 5 个 mutant,存活 4: src/mcp/server.ts(===->!==); src/mcp/standalone.ts(===->!==); src/triggers/api.ts(===->!==); src/types.ts(\\btrue\\b->false)"
     }
   ]
 }
