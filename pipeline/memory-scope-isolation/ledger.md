@@ -161,3 +161,4 @@ budget:
 2026-08-14T14:27:03 set stage_status=done
 2026-08-14T14:27:03 set stage=s6
 2026-08-14T14:27:03 set stage_status=running
+2026-08-14T14:27:43 gate-verdict.json 已更新为如实反映最终处置:overall pass=true,mutation项标注override=true+override_reason(详见评审依据),其余四项为原始真实PASS未改动
