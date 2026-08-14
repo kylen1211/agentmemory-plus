@@ -5,6 +5,8 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { getAllTools } from "../src/mcp/tools-registry.js";
+import { memoryToObservation } from "../src/state/memory-utils.js";
+import type { Memory } from "../src/types.js";
 
 // Shared mock scaffolding for this file (照抄 test/mcp-resources.test.ts:10-66),
 // reused by later FR-1/FR-4/FR-5 cases appended to this same file.
@@ -66,6 +68,41 @@ function makeReq(body?: unknown, headers?: Record<string, string>) {
     query_params: {},
   };
 }
+
+function makeMemory(overrides: Partial<Memory> = {}): Memory {
+  return {
+    id: "mem_test_1",
+    createdAt: "2026-08-14T00:00:00.000Z",
+    updatedAt: "2026-08-14T00:00:00.000Z",
+    type: "fact",
+    title: "test memory",
+    content: "test content",
+    concepts: [],
+    files: [],
+    sessionIds: [],
+    strength: 1,
+    version: 1,
+    isLatest: true,
+    ...overrides,
+  };
+}
+
+describe("FR-1", () => {
+  it("FR-1 memoryToObservation transparently passes through agentId and project", () => {
+    const memory = makeMemory({ agentId: "pm-agent", project: "worker-config" });
+    const observation = memoryToObservation(memory);
+    expect(observation.agentId).toBe("pm-agent");
+    expect(observation.project).toBe("worker-config");
+  });
+
+  it("FR-1 memoryToObservation leaves agentId/project undefined without defaults or errors", () => {
+    const memory = makeMemory();
+    expect(() => memoryToObservation(memory)).not.toThrow();
+    const observation = memoryToObservation(memory);
+    expect(observation.agentId).toBeUndefined();
+    expect(observation.project).toBeUndefined();
+  });
+});
 
 describe("FR-3", () => {
   it("FR-3 memory_save inputSchema exposes a string agentId property", () => {
