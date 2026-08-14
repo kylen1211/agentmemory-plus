@@ -2,7 +2,7 @@
 change_id: standalone-local-scope
 grade: L1
 contract_tier: cases
-stage: s1a
+stage: aborted
 stage_status: running
 pending: null
 base_commit: 64450db5d7006f1a25a5c3c1db946c192b03e833
@@ -37,3 +37,5 @@ budget:
 2026-08-14T17:38:04 set stage_status=done
 2026-08-14T17:38:04 set stage=s1a
 2026-08-14T17:38:04 set stage_status=running
+2026-08-14T17:52:58 set stage=aborted
+2026-08-14T17:52:58 ABORT reason=用户拍板放弃:本地兜底存储(~/.agentmemory/standalone.json)仅在服务不可达时使用,现场核实本机实际数据量仅6条且已被用户判定无价值,为此投入完整L1流程(PM取证已发现5个需拍板的开放问题,含validate()共用函数改动、过滤语义对齐、老数据兼容等)成本不值当,判定不做 artifacts=pipeline/standalone-local-scope/research/intake.md 保留作参考,ledger.md 保留为终局记录,不删除已产出的取证文档
