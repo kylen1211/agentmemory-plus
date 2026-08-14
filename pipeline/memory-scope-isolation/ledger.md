@@ -58,13 +58,14 @@ generated:
 uncovered:
 - id: C-FR7-3
   reason: 需人工重启/重连宿主MCP客户端观察;已拍板(design.md R-3)FR-7目标扩为仓库plugin/.mcp.json与客户端实际加载的插件缓存两份同改,C-FR7-1b已作为可执行判据覆盖两份内容一致性,本条manual仅覆盖'实测重启后agentId真正生效'这一步
-  status: pending
+  status: accepted
 parked:
-- item: C-FR7-2首跑瞬态失败
-  reason: T-B2首次跑C-FR7-2曾红(读回total=0)
-  复测8+次后稳定PASS: null
-  devops判定为worker冷启动类一次性瞬态非代码缺陷;若s5/s6 gate复跑再现同类偶发红先重跑2-3次排除瞬态再升级backend-dev定位mem::remember写入路径: null
+- id: P-001
+  item: C-FR7-2首跑瞬态失败
+  reason: T-B2首次跑C-FR7-2曾红(读回total=0),复测8+次后稳定PASS,devops判定为worker冷启动类一次性瞬态非代码缺陷;若下次变更gate复跑再现同类偶发红,先重跑2-3次排除瞬态,仍持续红才升级backend-dev定位mem::remember写入路径
   status: observe
+  ttl: 2026-11-12
+  on_expiry: escalate
 budget:
   limit_tokens: null
   spent_note: null
@@ -164,3 +165,7 @@ budget:
 2026-08-14T14:27:43 gate-verdict.json 已更新为如实反映最终处置:overall pass=true,mutation项标注override=true+override_reason(详见评审依据),其余四项为原始真实PASS未改动
 2026-08-14T14:47:23 loop review -> 1
 2026-08-14T14:47:36 review round1: pass=false,3条Important(deploy-runbook缺FR-6小节/ADR-6分支未建/plugin/.mcp.json未提交无拦截),无Critical,无需返工组A五处补丁;Important-2主会话直接处置:在当前HEAD(c257afe)打分支memory-scope-isolation作为锚点,main未移动,不追溯到base_commit重建历史;Important-1/3派devops-engineer补deploy-runbook.md
+2026-08-14T15:25:16 C-FR7-3 端到端验证完成:用户重启当前Claude CLI(claude --continue)重连agentmemory MCP,主会话在重连后的会话内实测 memory_save(content=probe-msi-c-fr7-3, agentId=probe-c-fr7-3)→写入mem_mssmgkww_860b276c0a66→memory_recall('probe-msi-c-fr7-3')服务端真实读回,结果agentId=probe-c-fr7-3完整持久化(非save响应回显,是独立recall调用命中);证明客户端重连后确实跑的是标 dist/standalone.mjs 补丁代码,FR-7 真正生效
+2026-08-14T15:25:16 set uncovered[0].status=accepted
+2026-08-14T15:25:16 uncovered C-FR7-3 → accepted(证据见上一行,非单纯人工口头接受,是真实端到端探针验证)
+2026-08-14T15:25:53 修复parked条目YAML格式错误(自由文本含冒号未加引号导致误拆成多余key);补齐id/ttl/on_expiry字段;pipeline-check closeout 通过(exit 0)
