@@ -1,0 +1,32 @@
+{
+  "pass": true,
+  "round": "review-round1-recheck",
+  "reason": "第1轮修复复评:3条Important全部ADDRESSED(FR-6小节三块内容落盘且改前/改后两行与systemd单元、备份文件实测逐字一致;锚点分支memory-scope-isolation存在且指向c257afe、main未移动;plugin/.mcp.json未提交态两种失效模式已登记且文件本身未被动)。修复为纯文档diff,无Critical/Important新破坏;新增Minor-5/6不阻塞",
+  "items": [
+    {
+      "name": "Important-1 deploy-runbook.md 缺 FR-6 小节,systemd 切换的回滚与长期约束无持久留痕",
+      "pass": true,
+      "evidence": "deploy-runbook.md:8-44(部署两行+daemon-reload/restart/探活执行序)、:91-107(回滚命令+期望态+人工触发条件)、:125-132(R-6 长期约束);改前两行 :14-15 与 /home/ky/.local/state/agentmemory-msi/agentmemory.service.pre-msi.bak:11-12 逐字一致,改后两行 :26-27 与 /home/ky/.config/systemd/user/agentmemory.service:11-12 逐字一致;design.md:201 经核对确为 R-6 原条;tsdown.config.ts:33-37 neverBundle 三包与 :129 一致;dist//node_modules/ 经 git check-ignore 确认命中 .gitignore:1-2"
+    },
+    {
+      "name": "Important-2 ADR-6 要求的分支未建,9 个 commit 直接落在本地 main",
+      "pass": true,
+      "evidence": "git show-ref: c257afeba8d6fbfb6d2783670000874442a3936b refs/heads/memory-scope-isolation(分支 ref,指向 review 所见 HEAD c257afe);git branch --show-current=main 且 git log --oneline -1 main=c257afe,main 未移动"
+    },
+    {
+      "name": "Important-3 发布态 plugin/.mcp.json 带本机绝对路径且处于未提交状态,两种失效模式都无拦截",
+      "pass": true,
+      "evidence": "deploy-runbook.md:138 新增条目登记失效模式①(git checkout/stash/切分支静默回退 FR-7,仅 gate 复跑 C-FR7-1/C-FR7-1b 时暴露)并压住②(提交前必须改回 npx);plugin/.mcp.json 未被动:git diff HEAD 仍为 node+dist/standalone.mjs 中间态,git status --porcelain 仍为 ' M',mtime 14:09:35 早于 runbook 14:49:38"
+    },
+    {
+      "name": "修复 diff 内新引入的破坏(Critical/Important)",
+      "pass": true,
+      "evidence": "fix-round1.diff 与 git diff HEAD -- deploy-runbook.md 逐字一致(仅 index 行差异),纯文档 66 行新增、零源码零配置改动;现场复跑 systemctl --user is-active agentmemory=active、livez=200,运行态未受影响"
+    },
+    {
+      "name": "Minor(2 条新增,不阻塞)",
+      "pass": true,
+      "evidence": "Minor-5 deploy-runbook.md:20 备份步骤缺 mkdir -p,干净环境重放会断在备份步;Minor-6 deploy-runbook.md:131 加粗标题『切分支会直接改变生产行为』与其自身括注拉扯(dist/ 被 gitignore,真正机制是切分支后的下一次 npm run build)"
+    }
+  ]
+}

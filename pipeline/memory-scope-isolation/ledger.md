@@ -9,7 +9,7 @@ base_commit: d60652a7058773fa9428fa720eda38942f12f014
 loop_counts:
   implement: 0
   integrate: 0
-  review: 0
+  review: 1
 rollback_count: 0
 frozen:
   prd:
@@ -162,3 +162,5 @@ budget:
 2026-08-14T14:27:03 set stage=s6
 2026-08-14T14:27:03 set stage_status=running
 2026-08-14T14:27:43 gate-verdict.json 已更新为如实反映最终处置:overall pass=true,mutation项标注override=true+override_reason(详见评审依据),其余四项为原始真实PASS未改动
+2026-08-14T14:47:23 loop review -> 1
+2026-08-14T14:47:36 review round1: pass=false,3条Important(deploy-runbook缺FR-6小节/ADR-6分支未建/plugin/.mcp.json未提交无拦截),无Critical,无需返工组A五处补丁;Important-2主会话直接处置:在当前HEAD(c257afe)打分支memory-scope-isolation作为锚点,main未移动,不追溯到base_commit重建历史;Important-1/3派devops-engineer补deploy-runbook.md
