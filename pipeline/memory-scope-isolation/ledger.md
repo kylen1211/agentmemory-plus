@@ -2,8 +2,8 @@
 change_id: memory-scope-isolation
 grade: L3
 contract_tier: cases
-stage: s6
-stage_status: running
+stage: done
+stage_status: done
 pending: PRD/设计/契约/任务卡待批(一次呈批,s2b step4);核心待拍板项见 act_msshmgwu(FR-7 mcp配置实际生效路径未证实);次要跟进见 act_msshmki7(agent-mem CLI补agentId,repo外)
 base_commit: d60652a7058773fa9428fa720eda38942f12f014
 loop_counts:
@@ -169,3 +169,6 @@ budget:
 2026-08-14T15:25:16 set uncovered[0].status=accepted
 2026-08-14T15:25:16 uncovered C-FR7-3 → accepted(证据见上一行,非单纯人工口头接受,是真实端到端探针验证)
 2026-08-14T15:25:53 修复parked条目YAML格式错误(自由文本含冒号未加引号导致误拆成多余key);补齐id/ttl/on_expiry字段;pipeline-check closeout 通过(exit 0)
+2026-08-14T15:26:15 retro cost=L3变更全流程(s0-s6),9张任务卡实现+1次s6全量评审+1轮修复复评+2次gate红(s4m typecheck基线债务/s5 mutation机制噪音,均主会话核实override)+1次closeout格式返工,总计约15个agent派发 user_found_ratio=0(用户全程未发现代码/机制缺陷,只做拍板决策+对implementer.md模板冗余的元层面观察,该观察已转action非本次变更缺陷) mechanism=留:gate.sh确定性闸门+两轮code-reviewer评审真实抓住3条Important(留痕/状态治理类)与pipeline-check closeout的YAML格式错误,证明机制有效;同时暴露2处机制自身待改进项(implementer.md冗余、mutation候选范围未收紧到diff hunk)已转config-globle项目action不阻塞本次
+2026-08-14T15:26:39 set stage_status=done
+2026-08-14T15:26:39 set stage=done
