@@ -7,6 +7,9 @@ vi.mock("../src/logger.js", () => ({
 vi.mock("../src/config.js", () => ({
   getConsolidationDecayDays: () => 30,
   isConsolidationEnabled: vi.fn(() => true),
+  // FR-7 (ADR-9): consolidation-gate.ts (imported transitively via
+  // mem::consolidate-pipeline) reads this to compute the cooldown window.
+  getConsolidationCooldownMs: vi.fn(() => 300000),
 }));
 
 import { registerConsolidationPipelineFunction } from "../src/functions/consolidation-pipeline.js";

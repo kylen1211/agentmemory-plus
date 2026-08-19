@@ -1,6 +1,7 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, fingerprintId } from "../state/schema.js";
+import { consolidationDue } from "../state/consolidation-gate.js";
 import type {
   Insight,
   GraphNode,
@@ -165,8 +166,16 @@ export function registerReflectFunctions(
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::reflect", 
-    async (data: { maxClusters?: number; project?: string }) => {
+  sdk.registerFunction("mem::reflect",
+    async (data: { maxClusters?: number; project?: string; bypassCooldown?: boolean }) => {
+      // FR-7 (ADR-9): bypassCooldown is internal-only, set by
+      // consolidation-pipeline.ts's own call to mem::reflect so the
+      // pipeline's reflect tier isn't blocked by the marker it just wrote.
+      // api::reflect (crontab POST /reflect) never forwards this field, so
+      // that entry point stays gated.
+      if (!data?.bypassCooldown && !(await consolidationDue(kv))) {
+        return { success: true, skipped: true, reason: "cooldown" };
+      }
       const maxClusters = Math.min(data?.maxClusters ?? 10, 20);
       const maxInsightsPerCluster = 5;
       const maxTotal = 50;

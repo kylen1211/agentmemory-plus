@@ -16,8 +16,31 @@ import {
 } from "../functions/graph-retrieval.js";
 import { extractEntitiesFromQuery } from "../functions/query-expansion.js";
 import { rerank } from "./reranker.js";
+import { getRankImportanceWeight, getRankConfidenceWeight } from "../config.js";
 
 const RRF_K = 60;
+
+// FR-5 / design.md ADR-8: RRF quality re-ranking. Runs after
+// enrichResults() has attached the actual CompressedObservation (with its
+// importance/confidence) and before the optional reranker — deliberately
+// does NOT touch SearchIndex.entries or the BM25 persisted format (ADR-8's
+// 被否方案 explicitly rejected that route: it needs an index migration for
+// a bigger retrieval window, not proportionate to what FR-5 actually asks
+// for).
+//
+// clamp(1 + W_IMP*((importance??5)-5)/5 + W_CONF*((confidence??0.5)-0.5), 0.5, 2.0)
+// importance/confidence absent (legacy pre-FR-1 rows) fall back to the
+// midpoint of their scale, i.e. a neutral 1.0x factor — unclassified
+// records are neither boosted nor penalized.
+function qualityFactor(obs: { importance?: number; confidence?: number }): number {
+  const wImp = getRankImportanceWeight();
+  const wConf = getRankConfidenceWeight();
+  const importance = typeof obs.importance === "number" ? obs.importance : 5;
+  const confidence = typeof obs.confidence === "number" ? obs.confidence : 0.5;
+  const raw =
+    1 + (wImp * (importance - 5)) / 5 + wConf * (confidence - 0.5);
+  return Math.max(0.5, Math.min(2.0, raw));
+}
 
 export class HybridSearch {
   private graphRetrieval: GraphRetrieval;
@@ -224,6 +247,17 @@ export class HybridSearch {
     const rerankWindow = 20;
     const diversified = this.diversifyBySession(combined, retrievalDepth);
     const enriched = await this.enrichResults(diversified, retrievalDepth);
+
+    // FR-5 / design.md ADR-8: apply the quality factor and re-sort. This
+    // mutates each result's combinedScore to the adjusted value (not just
+    // the array order) so downstream consumers reading `.combinedScore`
+    // (e.g. smart-search.ts's `score` field) see the same number that
+    // decided the ordering — no dual source of truth between "the score
+    // shown" and "the score actually used to rank".
+    for (const r of enriched) {
+      r.combinedScore = r.combinedScore * qualityFactor(r.observation);
+    }
+    enriched.sort((a, b) => b.combinedScore - a.combinedScore);
 
     if (this.rerankEnabled && enriched.length > 1) {
       try {

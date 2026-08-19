@@ -205,7 +205,11 @@ describe("Reflect", () => {
       const first = await kv.list<Insight>("mem:insights");
       expect(first.length).toBe(2);
 
-      const result = (await sdk.trigger("mem::reflect", {})) as {
+      // FR-7 (ADR-9): mem::reflect now has an internal cooldown gate; this
+      // test is about fingerprint dedup, not the gate, so bypass it for the
+      // second call within the same window (real internal-only escape hatch
+      // used by consolidation-pipeline.ts).
+      const result = (await sdk.trigger("mem::reflect", { bypassCooldown: true })) as {
         reinforced: number;
         newInsights: number;
       };

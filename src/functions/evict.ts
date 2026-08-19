@@ -94,9 +94,17 @@ async function runRecoveredSessionConsolidation(sdk: ISdk): Promise<void> {
     // One crystallization pass for the batch (the per-session fan-out was
     // suppressed with skipConsolidation), keeping recovered sessions
     // consistent with normally-stopped ones without the N-fold amplification.
+    //
+    // bypassCooldown: the consolidate-pipeline call directly above just
+    // wrote the shared cooldown marker (FR-7 ADR-9, src/state/
+    // consolidation-gate.ts). Without this, auto-crystallize would read
+    // that same marker moments later, see 0ms elapsed, and always skip —
+    // this call site already gated on isConsolidationEnabled() above and
+    // is internal-only, so it is safe to bypass (never forwarded from
+    // req.body; see api::auto-crystallize in triggers/api.ts).
     await sdk.trigger({
       function_id: "mem::auto-crystallize",
-      payload: { olderThanDays: 0 },
+      payload: { olderThanDays: 0, bypassCooldown: true },
     });
   } catch (err) {
     logger.warn("Recovered session consolidation failed", {

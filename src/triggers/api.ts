@@ -1826,7 +1826,35 @@ export function registerApiTriggers(
     },
   });
 
-  sdk.registerFunction("api::governance-bulk", 
+  // FR-8 (pipeline/agentmemory-data-reform, ADR-10): mirrors
+  // api::governance-delete, but for KV.insights. REST-only — no MCP
+  // exposure (PRD explicit non-goal).
+  sdk.registerFunction("api::insight-delete",
+    async (
+      req: ApiRequest<{ insightIds: string[]; reason?: string }>,
+    ): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      if (!req.body?.insightIds || !Array.isArray(req.body.insightIds) || req.body.insightIds.length === 0) {
+        return {
+          status_code: 400,
+          body: { error: "insightIds array is required" },
+        };
+      }
+      const result = await sdk.trigger({ function_id: "mem::insight-delete", payload: req.body });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::insight-delete",
+    config: {
+      api_path: "/agentmemory/insights",
+      http_method: "DELETE",
+    },
+  });
+
+  sdk.registerFunction("api::governance-bulk",
     async (
       req: ApiRequest<{
         type?: string[];
@@ -3042,8 +3070,15 @@ export function registerApiTriggers(
   sdk.registerFunction("api::auto-crystallize",  async (req: ApiRequest) => {
     const denied = checkAuth(req, secret);
     if (denied) return denied;
-    const body = req.body as Record<string, unknown>;
-    const result = await sdk.trigger({ function_id: "mem::auto-crystallize", payload: body || {} });
+    const body = (req.body as Record<string, unknown>) || {};
+    // Explicit field whitelist (not a raw body passthrough): mem::auto-crystallize's
+    // bypassCooldown is internal-only (FR-7 ADR-9, same pattern as mem::reflect's
+    // bypassCooldown) and must never be reachable from an external request body.
+    const result = await sdk.trigger({ function_id: "mem::auto-crystallize", payload: {
+      olderThanDays: typeof body.olderThanDays === "number" ? body.olderThanDays : undefined,
+      project: typeof body.project === "string" ? body.project : undefined,
+      dryRun: typeof body.dryRun === "boolean" ? body.dryRun : undefined,
+    } });
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::auto-crystallize", config: { api_path: "/agentmemory/crystals/auto", http_method: "POST" } });

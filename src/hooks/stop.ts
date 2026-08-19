@@ -40,13 +40,8 @@ async function main() {
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
 
-  fetch(`${REST_URL}/agentmemory/summarize`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ sessionId }),
-    signal: AbortSignal.timeout(120000),
-  }).catch(() => {});
-
+  // 本地补丁:summarize 由 /session/end 经 event::session::stopped 触发的 mem::summarize
+  // 统一负责,此处不再直连调用,否则每次 Stop 会跑两份 LLM 摘要。
   fetch(`${REST_URL}/agentmemory/session/end`, {
     method: "POST",
     headers: authHeaders(),

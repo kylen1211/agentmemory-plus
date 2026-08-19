@@ -9,7 +9,9 @@ import type {
 // spend. This is the default as of 0.8.8 (#138); users who want richer
 // LLM-generated summaries set AGENTMEMORY_AUTO_COMPRESS=true.
 
-function inferType(
+// Exported so subject.ts (FR-1) can reuse this rule-based classifier
+// instead of forking a second regex table (design.md ADR-2).
+export function inferType(
   toolName: string | undefined,
   hookType: string,
 ): ObservationType {
@@ -102,5 +104,8 @@ export function buildSyntheticCompression(
   if (raw.modality) result.modality = raw.modality;
   if (raw.imageData) result.imageData = raw.imageData;
   if (raw.agentId) result.agentId = raw.agentId;
+  // FR-1 / FR-6: same passthrough pattern as agentId above.
+  if (raw.subject) result.subject = raw.subject;
+  if (raw.repeatCount) result.repeatCount = raw.repeatCount;
   return result;
 }

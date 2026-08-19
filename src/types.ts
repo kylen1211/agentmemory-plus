@@ -27,6 +27,13 @@ export interface CommitLink {
   linkedAt: string;
 }
 
+// Write-time data subject classification (FR-1). `undefined` on a record
+// means "unclassified" — either legacy data written before this field
+// existed, or a record whose write path doesn't call classifySubject().
+// Downstream readers must treat undefined as "unclassified", not as any
+// one of the three concrete values (see subject.ts).
+export type ObservationSubject = "user" | "agent" | "execution";
+
 export interface RawObservation {
   id: string;
   sessionId: string;
@@ -41,6 +48,30 @@ export interface RawObservation {
   modality?: "text" | "image" | "mixed";
   imageData?: string;
   agentId?: string;
+  subject?: ObservationSubject;
+  // Per-record duplicate hit counter (FR-6). Absent/undefined reads as 1
+  // (the record itself, no repeats observed yet). Only ever incremented
+  // by the dedup-hit path in observe.ts / carried forward by compress.ts.
+  repeatCount?: number;
+  // FR-2 (design.md ADR-5 / PRD appendix D-4): the *dispatched subagent's
+  // own* identifier, lifted from the hook payload's `data.agent_id` for
+  // hookType ∈ {subagent_start, subagent_stop}. Deliberately NOT the same
+  // field as `agentId` above — `agentId` is the env/session-scoped owner
+  // used for team/scope isolation (memory-scope-isolation feature) and is
+  // constant for every record in a session, while `subagentId` identifies
+  // one specific Task dispatch and varies per subagent_start/stop pair.
+  // Reusing `agentId` for this would silently break isolation filtering
+  // for these two record kinds in team-scoped deployments — see this
+  // task's delivery RISKS for the design.md data-model note this deviates
+  // from. Used only to pair subagent_start/subagent_stop for the
+  // anomaly:"unpaired" scan (events.ts); undefined falls back to
+  // chronological pairing.
+  subagentId?: string;
+  // Which lifecycle hookType produced this record. CompressedObservation
+  // has no hookType field of its own, so without this the session-stop
+  // pairing scan (events.ts) can't tell a subagent_start flow record from
+  // a subagent_stop one once compress.ts has overwritten the raw record.
+  execHookType?: "subagent_start" | "subagent_stop";
 }
 
 export interface CompressedObservation {
@@ -62,6 +93,50 @@ export interface CompressedObservation {
   modality?: "text" | "image" | "mixed";
   agentId?: string;
   project?: string;
+  subject?: ObservationSubject;
+  repeatCount?: number;
+  // FR-2 (design.md ADR-5/A-3, data model): execution-record fields.
+  // executionKind distinguishes the two record shapes described in PRD
+  // FR-2 — "self_report" (one per SubagentStop trigger, LLM-structured
+  // self-narrative) vs "flow" (one per execution-subject tool call, a
+  // slimmed compression of the raw event). Both are only ever present
+  // when subject === "execution"; neither is ever passed to
+  // getSearchIndex().add() / vectorIndexAddGuarded() (FR-2 hard
+  // constraint — see execution-record.ts / compress.ts).
+  executionKind?: "self_report" | "flow";
+  // Only present when executionKind === "self_report"; absent (not an
+  // empty object) when LLM structured extraction failed and the record
+  // fell back to storing the raw self-report text in `narrative` instead
+  // (PRD FR-2 异常路径 — "记录不许丢").
+  executionDetail?: ExecutionDetail;
+  // Only present when executionKind === "flow". Rule-level signal only —
+  // set by a plain `hookType === "post_tool_failure"` string comparison
+  // in compress.ts, never derived from LLM output (PRD FR-2 判据: "产生
+  // 路径是规则匹配,不经 LLM 输出解析").
+  violation?: boolean;
+  // Only present when executionKind === "flow". Written back by the
+  // session-stop pairing scan (events.ts) onto whichever side of a
+  // subagent_start/subagent_stop pair has no match within the session
+  // (design.md ADR-5). task_completed records never participate in this
+  // scan (payload carries no agent_id to pair on — PRD appendix D-4).
+  anomaly?: "unpaired";
+  // See RawObservation.subagentId — carried through unchanged by
+  // compress.ts / execution-record.ts, same passthrough shape as
+  // agentId/subject above.
+  subagentId?: string;
+  execHookType?: "subagent_start" | "subagent_stop";
+}
+
+// FR-2 (design.md appendix A-4): structured extraction of a subagent's
+// SubagentStop self-report. `deviations` is the agent's own claimed
+// deviations as transcribed by the LLM — a self-report, not a
+// system-judged violation (that's the separate rule-level `violation`
+// field on flow records).
+export interface ExecutionDetail {
+  task: string;
+  keyDecisions: Array<{ decision: string; tool: string; reason: string }>;
+  deviations: string[];
+  selfAssessment: string;
 }
 
 export type ObservationType =

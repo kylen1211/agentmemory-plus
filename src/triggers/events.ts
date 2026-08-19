@@ -3,43 +3,13 @@ import type { CompressedObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
+import { scanUnpairedSubagentEvents } from "../functions/execution-record.js";
 import {
   getAgentId,
-  getConsolidationCooldownMs,
   isConsolidationEnabled,
   isGraphExtractionEnabled,
 } from "../config.js";
 import { logger } from "../logger.js";
-
-// Global marker recording when corpus consolidation last ran, used to debounce
-// the per-turn session-stop fan-out.
-const CONSOLIDATION_MARKER_KEY = "consolidation:lastRun";
-
-async function consolidationDueUnserialized(kv: StateKV): Promise<boolean> {
-  const cooldownMs = getConsolidationCooldownMs();
-  if (cooldownMs <= 0) return true; // debounce disabled
-  const now = Date.now();
-  const marker = await kv
-    .get<{ at?: number }>(KV.config, CONSOLIDATION_MARKER_KEY)
-    .catch(() => null);
-  const lastAt = typeof marker?.at === "number" ? marker.at : 0;
-  if (now - lastAt < cooldownMs) return false;
-  await kv.set(KV.config, CONSOLIDATION_MARKER_KEY, { at: now }).catch(() => {});
-  return true;
-}
-
-// Concurrent session-stop events would otherwise interleave the marker
-// read-check-write above and both pass the cooldown. Serialize the whole
-// check through an in-process chain so exactly one concurrent caller wins.
-let consolidationCheckChain: Promise<unknown> = Promise.resolve();
-
-function consolidationDue(kv: StateKV): Promise<boolean> {
-  const result = consolidationCheckChain.then(() =>
-    consolidationDueUnserialized(kv),
-  );
-  consolidationCheckChain = result.catch(() => false);
-  return result;
-}
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
@@ -96,6 +66,21 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
 
   sdk.registerFunction("event::session::stopped", async (data: { sessionId: string; skipConsolidation?: boolean }) => {
     const summary = await sdk.trigger({ function_id: "mem::summarize", payload: data });
+
+    // FR-2 / design.md ADR-5: session-end scan pairing subagent_start <->
+    // subagent_stop "flow" records, writing anomaly:"unpaired" onto
+    // whichever side has no match. Best-effort — a scan failure must not
+    // fail the whole session-stop handler (summary above already
+    // succeeded and is the more load-bearing return value here).
+    try {
+      await scanUnpairedSubagentEvents(kv, data.sessionId);
+    } catch (err) {
+      logger.warn("scanUnpairedSubagentEvents failed", {
+        sessionId: data.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const fireVoid = (function_id: string, payload: unknown) =>
       sdk
         .trigger({ function_id, payload, action: TriggerAction.Void() })
@@ -143,12 +128,16 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
     // handler fires on every agent turn. consolidate-pipeline + auto-crystallize
     // are full-corpus LLM work with no internal "nothing changed" guard, so
     // firing them every turn is a cost/latency storm for connected agents.
-    // Bound the global corpus consolidation to once per cooldown window.
+    // The cooldown gate itself now lives inside mem::consolidate-pipeline and
+    // mem::auto-crystallize (src/state/consolidation-gate.ts, FR-7 ADR-9) so
+    // every entry point — this one, the 2h timer, evict, and crontab
+    // POST /reflect — shares the same debounce. This call site only keeps the
+    // enabled/skipConsolidation gate: consolidate-pipeline's own "disabled"
+    // check is bypassed by the force:true below, so dropping this check here
+    // would turn consolidation on under CONSOLIDATION_ENABLED=false.
     if (isConsolidationEnabled() && !data.skipConsolidation) {
-      if (await consolidationDue(kv)) {
-        fireVoid("mem::consolidate-pipeline", { tier: "all", force: true });
-        fireVoid("mem::auto-crystallize", { olderThanDays: 0 });
-      }
+      fireVoid("mem::consolidate-pipeline", { tier: "all", force: true });
+      fireVoid("mem::auto-crystallize", { olderThanDays: 0 });
     }
     return summary;
   });

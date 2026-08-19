@@ -1,6 +1,7 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
+import { consolidationDue } from "../state/consolidation-gate.js";
 import type { Action, ActionEdge, Crystal, MemoryProvider } from "../types.js";
 
 interface CrystalDigest {
@@ -145,14 +146,30 @@ export function registerCrystallizeFunction(
     },
   );
 
-  sdk.registerFunction("mem::auto-crystallize", 
+  sdk.registerFunction("mem::auto-crystallize",
     async (data: {
       olderThanDays?: number;
       project?: string;
       dryRun?: boolean;
+      bypassCooldown?: boolean;
     }) => {
-      const olderThanDays = data.olderThanDays ?? 7;
+      // FR-7 (ADR-9, D-5): auto-crystallize shares the same events.ts
+      // fireVoid call site as mem::consolidate-pipeline, so it must share
+      // the same cooldown gate — otherwise dropping the caller-side gate
+      // (ADR-9 action 1) turns this into a full-corpus crystallize on every
+      // agent turn.
+      //
+      // dryRun is a read-only preview and must not consume the cooldown
+      // window: evict.ts's runRecoveredSessionConsolidation runs a real
+      // (non-dryRun) mem::consolidate-pipeline immediately before this call
+      // and needs auto-crystallize to still fire in the same pass, so it
+      // passes bypassCooldown:true (internal-only, same pattern as
+      // mem::reflect's bypassCooldown — never forwarded from req.body).
       const dryRun = data.dryRun ?? false;
+      if (!dryRun && !data.bypassCooldown && !(await consolidationDue(kv))) {
+        return { success: true, skipped: true, reason: "cooldown" };
+      }
+      const olderThanDays = data.olderThanDays ?? 7;
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
 
       let allActions = await kv.list<Action>(KV.actions);

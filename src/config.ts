@@ -17,6 +17,12 @@ function safeParseInt(value: string | undefined, fallback: number): number {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function safeParseFloat(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
 const DATA_DIR = join(homedir(), ".agentmemory");
 const ENV_FILE = join(DATA_DIR, ".env");
 
@@ -515,4 +521,142 @@ export function loadFallbackConfig(): FallbackConfig {
       return true;
     });
   return { providers };
+}
+
+// --- FR-1 subject classification (design.md ADR-2) ---------------------
+
+function splitCsvEnv(value: string | undefined, fallback: string[]): string[] {
+  if (!value) return fallback;
+  const parts = value
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return parts.length > 0 ? parts : fallback;
+}
+
+const SUBJECT_EXECUTION_HOOKTYPES_DEFAULT = [
+  "subagent_start",
+  "subagent_stop",
+  "task_completed",
+];
+
+export function getSubjectExecutionHookTypes(): string[] {
+  return splitCsvEnv(
+    getMergedEnv()["AGENTMEMORY_SUBJECT_EXECUTION_HOOKTYPES"],
+    SUBJECT_EXECUTION_HOOKTYPES_DEFAULT,
+  );
+}
+
+// Declared per design.md appendix B as a tuning knob "same-sourced as
+// inferType's built-in word list". classifySubject() calls inferType()
+// unmodified (reuse, don't fork a second regex table) AND separately
+// word-boundary-matches toolName against this table directly (subject.ts)
+// — either path hitting is sufficient, so this env var is a live knob:
+// changing it (no rebuild needed) does change subagent detection, even
+// though inferType's own baked-in ["task","agent"] list is untouched.
+const SUBJECT_EXECUTION_TOOL_KEYWORDS_DEFAULT = ["task", "agent"];
+
+export function getSubjectExecutionToolKeywords(): string[] {
+  return splitCsvEnv(
+    getMergedEnv()["AGENTMEMORY_SUBJECT_EXECUTION_TOOL_KEYWORDS"],
+    SUBJECT_EXECUTION_TOOL_KEYWORDS_DEFAULT,
+  );
+}
+
+const SUBJECT_USER_HOOKTYPES_DEFAULT = ["prompt_submit"];
+
+export function getSubjectUserHookTypes(): string[] {
+  return splitCsvEnv(
+    getMergedEnv()["AGENTMEMORY_SUBJECT_USER_HOOKTYPES"],
+    SUBJECT_USER_HOOKTYPES_DEFAULT,
+  );
+}
+
+// --- FR-6 dedup widening (design.md ADR-6/ADR-7) ------------------------
+
+const DEDUP_TTL_DEFAULT_MS = 1_800_000; // 30 minutes
+
+export function getDedupTtlMs(): number {
+  const raw = safeParseInt(
+    getMergedEnv()["AGENTMEMORY_DEDUP_TTL_MS"],
+    DEDUP_TTL_DEFAULT_MS,
+  );
+  return raw >= 0 ? raw : DEDUP_TTL_DEFAULT_MS;
+}
+
+// --- FR-4 low-value pruning (design.md ADR-3, appendix B) ---------------
+
+// Zero-information gate: default ON. Only "false"/"0" turns it off — every
+// other boolean flag in this file defaults to false-unless-"true", but this
+// one is specified in design.md appendix B as default true.
+export function isDropEmptyOutputEnabled(): boolean {
+  const v = getMergedEnv()["AGENTMEMORY_DROP_EMPTY_OUTPUT"];
+  return v !== "false" && v !== "0";
+}
+
+// Low-value delete total gate: default OFF (design.md appendix B — ship
+// dark, enable after observing audit output for 24-48h). Do not flip this
+// default; it's the rollback safety margin called out in design.md's
+// "难逆决策" section.
+export function isLowValuePruneEnabled(): boolean {
+  return getMergedEnv()["AGENTMEMORY_LOWVALUE_PRUNE_ENABLED"] === "true";
+}
+
+// Dry-run sub-gate: default ON (record audit, don't actually delete) even
+// when the total gate above is on. Do not flip this default either.
+export function isLowValuePruneDryRun(): boolean {
+  const v = getMergedEnv()["AGENTMEMORY_LOWVALUE_PRUNE_DRY_RUN"];
+  return v !== "false" && v !== "0";
+}
+
+const LOWVALUE_MIN_IMPORTANCE_DEFAULT = 3;
+
+export function getLowValueMinImportance(): number {
+  return safeParseInt(
+    getMergedEnv()["AGENTMEMORY_LOWVALUE_MIN_IMPORTANCE"],
+    LOWVALUE_MIN_IMPORTANCE_DEFAULT,
+  );
+}
+
+const LOWVALUE_MIN_CONFIDENCE_DEFAULT = 0.3;
+
+// NOTE: 0.3 intentionally equals compress-synthetic.ts's hardcoded
+// fallback confidence. The comparison is strict `<` everywhere this is
+// consumed — never `<=` — so the zero-LLM synthetic path never gets
+// swept by this threshold. See design.md appendix B closing note.
+export function getLowValueMinConfidence(): number {
+  return safeParseFloat(
+    getMergedEnv()["AGENTMEMORY_LOWVALUE_MIN_CONFIDENCE"],
+    LOWVALUE_MIN_CONFIDENCE_DEFAULT,
+  );
+}
+
+// --- FR-2 execution self-report (design.md ADR-4, appendix B) -----------
+
+// Default ON (design.md appendix B). Turning this off is the rollback
+// switch for the self-report extraction path — execution observations
+// still get a "flow" audit record via mem::compress, they just never get
+// a "self_report" one.
+export function isExecSelfReportEnabled(): boolean {
+  const v = getMergedEnv()["AGENTMEMORY_EXEC_SELF_REPORT_ENABLED"];
+  return v !== "false" && v !== "0";
+}
+
+// --- FR-5 RRF quality re-ranking (design.md ADR-8, appendix B) ----------
+
+const RANK_IMPORTANCE_WEIGHT_DEFAULT = 0.3;
+const RANK_CONFIDENCE_WEIGHT_DEFAULT = 0.1;
+
+export function getRankImportanceWeight(): number {
+  return safeParseFloat(
+    getMergedEnv()["AGENTMEMORY_RANK_IMPORTANCE_WEIGHT"],
+    RANK_IMPORTANCE_WEIGHT_DEFAULT,
+  );
+}
+
+export function getRankConfidenceWeight(): number {
+  return safeParseFloat(
+    getMergedEnv()["AGENTMEMORY_RANK_CONFIDENCE_WEIGHT"],
+    RANK_CONFIDENCE_WEIGHT_DEFAULT,
+  );
 }

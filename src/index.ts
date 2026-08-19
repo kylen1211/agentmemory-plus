@@ -32,6 +32,7 @@ import { registerVisionSearchFunctions } from "./functions/vision-search.js";
 import { registerSlotsFunctions, isSlotsEnabled, isReflectEnabled } from "./functions/slots.js";
 import { registerDiskSizeManager } from "./functions/disk-size-manager.js";
 import { registerCompressFunction } from "./functions/compress.js";
+import { registerExecutionRecordFunction } from "./functions/execution-record.js";
 import {
   registerSearchFunction,
   rebuildIndex,
@@ -62,6 +63,7 @@ import { registerGraphImportFunction } from "./functions/graph-import.js";
 import { registerConsolidationPipelineFunction } from "./functions/consolidation-pipeline.js";
 import { registerTeamFunction } from "./functions/team.js";
 import { registerGovernanceFunction } from "./functions/governance.js";
+import { registerInsightGovernanceFunction } from "./functions/insight-governance.js";
 import { registerSnapshotFunction } from "./functions/snapshot.js";
 import { registerActionsFunction } from "./functions/actions.js";
 import { registerFrontierFunction } from "./functions/frontier.js";
@@ -247,6 +249,9 @@ async function main() {
   }
   registerDiskSizeManager(sdk, kv);
   registerCompressFunction(sdk, kv, provider, metricsStore);
+  // FR-2 (design.md ADR-4/A-3): "mem::exec-self-report" — internal-only,
+  // no REST/MCP surface (see A-3), triggered Void() from observe.ts.
+  registerExecutionRecordFunction(sdk, kv, provider, metricsStore);
   registerSearchFunction(sdk, kv);
   registerContextFunction(sdk, kv, config.tokenBudget);
   registerSummarizeFunction(sdk, kv, provider, metricsStore);
@@ -310,6 +315,7 @@ async function main() {
   }
 
   registerGovernanceFunction(sdk, kv);
+  registerInsightGovernanceFunction(sdk, kv);
 
   registerActionsFunction(sdk, kv);
   registerFrontierFunction(sdk, kv);

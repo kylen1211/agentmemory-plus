@@ -5,12 +5,15 @@ import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
 import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { isAutoCompressEnabled } from "../config.js";
+import { isAutoCompressEnabled, isExecSelfReportEnabled } from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
+import { classifySubject } from "./subject.js";
+import { shouldDropEmptyObservation } from "./prune.js";
+import { getCounters } from "../telemetry/setup.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -67,14 +70,61 @@ export function registerObserveFunction(
           typeof payload.data === "object" && payload.data !== null
             ? (payload.data as Record<string, unknown>)
             : {};
-        const toolName = (d["tool_name"] as string) || payload.hookType;
-        dedupHash = dedupMap.computeHash(
-          payload.sessionId,
-          toolName,
-          d["tool_input"],
-        );
-        if (dedupMap.isDuplicate(dedupHash)) {
-          return { deduplicated: true, sessionId: payload.sessionId };
+        const rawToolName = d["tool_name"] as string | undefined;
+        const hasRealToolName =
+          typeof rawToolName === "string" && rawToolName.length > 0;
+        // qa-tester P0 fix (pipeline/agentmemory-data-reform, post-deploy):
+        // lifecycle events (subagent_start/subagent_stop/task_completed/
+        // session_start/notification — anything with no real tool_name,
+        // where observe.ts previously fell back to hookType as the "tool
+        // name") completely skip the DedupMap — no hash computed, no
+        // isDuplicate check, no record() call below. Each such event
+        // represents an independent fact and must never be deduplicated
+        // against another one, same-session or cross-session. The prior
+        // "keep sessionId in the hash" mitigation (ADR-6) only prevented
+        // cross-session collisions; real subagent_start/subagent_stop
+        // payloads never populate tool_input/tool_output and don't hash
+        // agent_id, so two *different* agents dispatched in the SAME
+        // session within the TTL window still hashed identically and the
+        // second one's self_report silently never fired. Real tool-name
+        // observations are unaffected: they still dedup exactly as before.
+        if (hasRealToolName) {
+          const toolName = rawToolName;
+          dedupHash = dedupMap.computeHash(
+            toolName,
+            d["tool_input"],
+            d["tool_output"] ?? d["error"],
+          );
+          const dup = dedupMap.getEntry(dedupHash);
+          if (dup) {
+            getCounters().dedupSkipped.add(1);
+            // ADR-7: repeatCount lives on the target record, not on this
+            // (never-created) duplicate. confidence is deliberately left
+            // untouched — its semantics are independent of dedup hits.
+            let repeatCount = 2;
+            try {
+              const existing = await kv.get<{ repeatCount?: number }>(
+                KV.observations(dup.sessionId),
+                dup.obsId,
+              );
+              repeatCount = (existing?.repeatCount ?? 1) + 1;
+              await kv.update(KV.observations(dup.sessionId), dup.obsId, [
+                { type: "set", path: "repeatCount", value: repeatCount },
+              ]);
+            } catch (error) {
+              logger.warn("Failed to write repeatCount on dedup hit", {
+                obsId: dup.obsId,
+                sessionId: dup.sessionId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            return {
+              deduplicated: true,
+              sessionId: payload.sessionId,
+              obsId: dup.obsId,
+              repeatCount,
+            };
+          }
         }
       }
 
@@ -96,6 +146,11 @@ export function registerObserveFunction(
       };
 
       let extractedImage: string | undefined;
+      // Gap B fix (pipeline/agentmemory-data-reform dispatch): the
+      // untouched `d["tool_output"]` payload field, captured here where
+      // `d` is in scope, so the zero-information gate below can see past
+      // the `|| d["error"]` merge's "" -> undefined collapse.
+      let originalToolOutputField: unknown;
 
       if (typeof sanitizedRaw === "object" && sanitizedRaw !== null) {
         const d = sanitizedRaw as Record<string, unknown>;
@@ -105,10 +160,36 @@ export function registerObserveFunction(
         ) {
           raw.toolName = d["tool_name"] as string | undefined;
           raw.toolInput = d["tool_input"];
+          originalToolOutputField = d["tool_output"];
           raw.toolOutput = d["tool_output"] || d["error"];
         }
         if (payload.hookType === "prompt_submit") {
           raw.userPrompt = d["prompt"] as string | undefined;
+        }
+        if (payload.hookType === "subagent_stop") {
+          // FR-2 / design.md ADR-4: the self-report source text is
+          // already on the payload (src/hooks/subagent-stop.ts posts it
+          // as `data.last_message`) — plugin side needs zero changes.
+          // types.ts's `assistantResponse` field existed before this task
+          // but nothing wrote it; this is that missing write.
+          const lastMessage = d["last_message"];
+          if (typeof lastMessage === "string" && lastMessage.trim().length > 0) {
+            raw.assistantResponse = lastMessage;
+          }
+        }
+        if (
+          payload.hookType === "subagent_start" ||
+          payload.hookType === "subagent_stop"
+        ) {
+          // FR-2 / design.md ADR-5: the dispatched subagent's own id,
+          // needed by the session-stop start/stop pairing scan
+          // (events.ts). Deliberately not stored on `agentId` — see
+          // types.ts RawObservation.subagentId for why.
+          const agentIdField = d["agent_id"];
+          if (typeof agentIdField === "string" && agentIdField.trim().length > 0) {
+            raw.subagentId = agentIdField;
+          }
+          raw.execHookType = payload.hookType;
         }
 
         extractedImage = extractImage(sanitizedRaw);
@@ -120,6 +201,23 @@ export function registerObserveFunction(
         if (extractedImage) {
           raw.modality = "image";
         }
+      }
+
+      // FR-1 / design.md ADR-1: classify once, here, before anything is
+      // persisted — compress.ts / compress-synthetic.ts just pass this
+      // value through (same shape as agentId).
+      raw.subject = classifySubject(raw);
+
+      // FR-4 bullet 1 / design.md ADR-3: zero-information observations are
+      // dropped before the first kv.set — nothing is written, mem::compress
+      // never fires, no index entry is ever created for this obsId.
+      if (shouldDropEmptyObservation(raw, originalToolOutputField)) {
+        logger.info("Dropped zero-information observation", {
+          obsId,
+          sessionId: payload.sessionId,
+          hook: payload.hookType,
+        });
+        return { success: true, dropped: true, reason: "empty_output" };
       }
 
       const pendingImageData = extractedImage;
@@ -200,7 +298,7 @@ export function registerObserveFunction(
         }
 
         if (dedupMap && dedupHash) {
-          dedupMap.record(dedupHash);
+          dedupMap.record(dedupHash, obsId, payload.sessionId);
         }
 
         await sdk.trigger({
@@ -280,11 +378,45 @@ export function registerObserveFunction(
           });
         }
 
+        // FR-2 / design.md ADR-4: self-report structured extraction is its
+        // own function (mem::exec-self-report), gated by its own env flag
+        // (AGENTMEMORY_EXEC_SELF_REPORT_ENABLED) — it fires regardless of
+        // AGENTMEMORY_AUTO_COMPRESS below because it's the PRD's primary
+        // supervision record ("本条的主要监督对象"), not the general
+        // LLM-cost-controlled compression path. Void() — never blocks the
+        // observe response, and self-report failures fall back internally
+        // (execution-record.ts) rather than surfacing here.
+        if (
+          payload.hookType === "subagent_stop" &&
+          typeof raw.assistantResponse === "string" &&
+          raw.assistantResponse.trim().length > 0 &&
+          isExecSelfReportEnabled()
+        ) {
+          await sdk.trigger({
+            function_id: "mem::exec-self-report",
+            payload: {
+              observationId: obsId,
+              sessionId: payload.sessionId,
+              raw,
+            },
+            action: TriggerAction.Void(),
+          });
+        }
+
         // Per-observation LLM compression is opt-in as of 0.8.8.
         // Default path: build a zero-LLM synthetic compression so recall
         // and BM25 search still work without burning the user's Claude
         // token allocation on every tool invocation.
-        if (isAutoCompressEnabled()) {
+        //
+        // FR-2 hard constraint: execution-subject observations always go
+        // through mem::compress (the "flow" branch there tags
+        // executionKind:"flow" and skips indexing) regardless of
+        // AUTO_COMPRESS — the synthetic path below unconditionally calls
+        // getSearchIndex().add() / vectorIndexAddGuarded(), which would
+        // put execution records into the search index the moment
+        // AUTO_COMPRESS is off (design.md ADR-5 lists observe.ts as a T-4
+        // file specifically for this branch).
+        if (isAutoCompressEnabled() || raw.subject === "execution") {
           await sdk.trigger({
             function_id: "mem::compress",
             payload: {
@@ -336,7 +468,10 @@ export function registerObserveFunction(
           obsId,
           sessionId: payload.sessionId,
           hook: payload.hookType,
-          compress: isAutoCompressEnabled() ? "llm" : "synthetic",
+          compress:
+            isAutoCompressEnabled() || raw.subject === "execution"
+              ? "llm"
+              : "synthetic",
         });
         return { observationId: obsId };
       });

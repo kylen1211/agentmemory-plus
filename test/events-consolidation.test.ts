@@ -9,7 +9,6 @@ vi.mock("../src/config.js", () => ({
   getAgentId: vi.fn(() => undefined),
   isConsolidationEnabled: vi.fn(() => true),
   isGraphExtractionEnabled: vi.fn(() => false),
-  getConsolidationCooldownMs: vi.fn(() => 300000),
 }));
 
 vi.mock("../src/functions/slots.js", () => ({
@@ -20,7 +19,6 @@ import { registerEventTriggers } from "../src/triggers/events.js";
 import {
   isConsolidationEnabled,
   isGraphExtractionEnabled,
-  getConsolidationCooldownMs,
 } from "../src/config.js";
 import { isReflectEnabled } from "../src/functions/slots.js";
 import { logger } from "../src/logger.js";
@@ -30,11 +28,40 @@ import { logger } from "../src/logger.js";
 // slot-reflect / consolidate-pipeline / auto-crystallize, each gated by config.
 // The client session-end hook no longer POSTs crystals/auto or
 // consolidate-pipeline, so these no longer double-fire for Claude Code.
+//
+// FR-7 (pipeline/agentmemory-data-reform, ADR-9): the cooldown debounce that
+// used to live at this call site (consolidationDue / consolidationDueUnserialized
+// / the serialized promise chain) has been extracted to
+// src/state/consolidation-gate.ts and moved INTO mem::consolidate-pipeline,
+// mem::reflect, and mem::auto-crystallize themselves, so every entry point
+// (this one, the 2h timer, evict, crontab POST /reflect) shares one gate.
+// This file therefore no longer asserts debounce behavior — that lives in
+// test/consolidation-gate.test.ts — and instead asserts the two things this
+// call site is still responsible for: (a) the isConsolidationEnabled() &&
+// !skipConsolidation guard (ADR-9 config action 2 — must NOT be removed,
+// since it fires with force:true which bypasses the callee's own enabled
+// check), and (b) that it now fires unconditionally on every stop (no local
+// debounce left to strip).
 
 function mockKV() {
   return {
     get: vi.fn(async () => null),
     set: vi.fn(async (_scope: string, _key: string, data: unknown) => data),
+    delete: vi.fn(async () => {}),
+    update: vi.fn(async () => {}),
+    list: vi.fn(async () => []),
+  };
+}
+
+function persistentKV() {
+  const store = new Map<string, Map<string, unknown>>();
+  return {
+    get: vi.fn(async (scope: string, key: string) => store.get(scope)?.get(key) ?? null),
+    set: vi.fn(async (scope: string, key: string, data: unknown) => {
+      if (!store.has(scope)) store.set(scope, new Map());
+      store.get(scope)!.set(key, data);
+      return data;
+    }),
     delete: vi.fn(async () => {}),
     update: vi.fn(async () => {}),
     list: vi.fn(async () => []),
@@ -114,6 +141,11 @@ describe("event::session::stopped consolidation fan-out", () => {
   });
 
   it("skips consolidate-pipeline and auto-crystallize when consolidation disabled but still summarizes", async () => {
+    // Regression guard for FR-7 ADR-9 config action 2: consolidate-pipeline's
+    // own `!data?.force && !isConsolidationEnabled()` check is bypassed by
+    // the force:true this call site sends, so if this isConsolidationEnabled()
+    // guard were ever removed here, CONSOLIDATION_ENABLED=false would no
+    // longer actually stop consolidation from running.
     vi.mocked(isConsolidationEnabled).mockReturnValue(false);
     const { sdk, handlers, trigger } = mockSdk();
     registerEventTriggers(sdk as never, mockKV() as never);
@@ -162,17 +194,6 @@ describe("event::session::stopped consolidation fan-out", () => {
     expect(ids).toContain("mem::auto-crystallize");
   });
 
-  it("respects the cooldown across repeated stops but this suite's non-persistent KV fires each single call", async () => {
-    // Sanity: with the default cooldown and a fresh (marker-less) KV, a single
-    // stop still consolidates. The real debounce is exercised below with a
-    // persistent KV.
-    vi.mocked(getConsolidationCooldownMs).mockReturnValue(300000);
-    const { sdk, handlers, trigger } = mockSdk();
-    registerEventTriggers(sdk as never, mockKV() as never);
-    await handlers.get("event::session::stopped")!({ sessionId: "ses_1" });
-    expect(functionIds(trigger)).toContain("mem::consolidate-pipeline");
-  });
-
   it("respects isReflectEnabled gating for slot-reflect", async () => {
     vi.mocked(isReflectEnabled).mockReturnValue(false);
     const off = mockSdk();
@@ -202,6 +223,30 @@ describe("event::session::stopped consolidation fan-out", () => {
       "mem::consolidate-pipeline trigger failed",
       expect.objectContaining({ sessionId: "ses_1" }),
     );
+  });
+
+  it("[FR-7 ADR-9 regression] no longer debounces at this call site — the cooldown gate moved into the callees", async () => {
+    // Before FR-7: this call site itself checked consolidationDue(kv) and
+    // only fired consolidate-pipeline/auto-crystallize once per cooldown
+    // window, even across many stops. After FR-7 that gate lives inside
+    // mem::consolidate-pipeline / mem::reflect / mem::auto-crystallize
+    // (see consolidation-gate.test.ts), so this call site fires on every
+    // single stop unconditionally (real debounce happens downstream, once
+    // per real function invocation, exercised against the real handlers).
+    vi.mocked(isConsolidationEnabled).mockReturnValue(true);
+    const { sdk, handlers, trigger } = mockSdk();
+    registerEventTriggers(sdk as never, persistentKV() as never);
+    const stopped = handlers.get("event::session::stopped")!;
+
+    for (let i = 0; i < 3; i++) await stopped({ sessionId: "ses_1" });
+
+    const count = (id: string) =>
+      trigger.mock.calls.filter(
+        (c) => (c[0] as { function_id: string }).function_id === id,
+      ).length;
+
+    expect(count("mem::consolidate-pipeline")).toBe(3);
+    expect(count("mem::auto-crystallize")).toBe(3);
   });
 });
 
@@ -235,90 +280,5 @@ describe("session-end hook no longer double-fires consolidation", () => {
   it("keeps the null-guard and main().catch() patterns", () => {
     expect(src).toContain('if (!data || typeof data !== "object") return;');
     expect(src).toContain("main().catch(() => process.exit(0));");
-  });
-});
-
-// A KV that actually persists writes, so the debounce marker survives between
-// simulated per-turn stops.
-function persistentKV() {
-  const store = new Map<string, Map<string, unknown>>();
-  return {
-    get: vi.fn(async (scope: string, key: string) => store.get(scope)?.get(key) ?? null),
-    set: vi.fn(async (scope: string, key: string, data: unknown) => {
-      if (!store.has(scope)) store.set(scope, new Map());
-      store.get(scope)!.set(key, data);
-      return data;
-    }),
-    delete: vi.fn(async () => {}),
-    update: vi.fn(async () => {}),
-    list: vi.fn(async () => []),
-  };
-}
-
-// Regression: the Stop hook posts /session/end on every agent turn, which fires
-// event::session::stopped. consolidate-pipeline + auto-crystallize are full
-// corpus LLM work with no internal "nothing changed" guard, so firing them per
-// turn is a cost/latency storm for connected agents (Claude/Codex/Copilot/
-// Hermes). The debounce bounds corpus consolidation to once per cooldown.
-describe("session-stop consolidation debounce", () => {
-  beforeEach(() => {
-    vi.mocked(isConsolidationEnabled).mockReturnValue(true);
-    vi.mocked(isGraphExtractionEnabled).mockReturnValue(false);
-    vi.mocked(isReflectEnabled).mockReturnValue(false);
-    vi.mocked(getConsolidationCooldownMs).mockReturnValue(300000);
-  });
-
-  it("consolidates at most once across many per-turn stops within the cooldown", async () => {
-    const { sdk, handlers, trigger } = mockSdk();
-    registerEventTriggers(sdk as never, persistentKV() as never);
-    const stopped = handlers.get("event::session::stopped")!;
-
-    // 5 per-turn Stop hooks in quick succession (all within the cooldown).
-    for (let i = 0; i < 5; i++) await stopped({ sessionId: "ses_1" });
-
-    const count = (id: string) =>
-      trigger.mock.calls.filter(
-        (c) => (c[0] as { function_id: string }).function_id === id,
-      ).length;
-
-    // Corpus consolidation runs ONCE, not five times.
-    expect(count("mem::consolidate-pipeline")).toBe(1);
-    expect(count("mem::auto-crystallize")).toBe(1);
-    // Per-turn summary capture still runs every turn (the cheap path).
-    expect(count("mem::summarize")).toBe(5);
-  });
-
-  it("consolidates once when stops arrive concurrently (serialized cooldown check)", async () => {
-    // Regression: without serialization, two stops racing through the marker
-    // read-check-write both observe the stale marker and both fire.
-    const { sdk, handlers, trigger } = mockSdk();
-    registerEventTriggers(sdk as never, persistentKV() as never);
-    const stopped = handlers.get("event::session::stopped")!;
-
-    await Promise.all([
-      stopped({ sessionId: "ses_1" }),
-      stopped({ sessionId: "ses_2" }),
-      stopped({ sessionId: "ses_3" }),
-    ]);
-
-    const consolidateCount = trigger.mock.calls.filter(
-      (c) => (c[0] as { function_id: string }).function_id === "mem::consolidate-pipeline",
-    ).length;
-    expect(consolidateCount).toBe(1);
-  });
-
-  it("consolidates on every stop when the cooldown is disabled (0)", async () => {
-    vi.mocked(getConsolidationCooldownMs).mockReturnValue(0);
-    const { sdk, handlers, trigger } = mockSdk();
-    registerEventTriggers(sdk as never, persistentKV() as never);
-    const stopped = handlers.get("event::session::stopped")!;
-
-    await stopped({ sessionId: "ses_1" });
-    await stopped({ sessionId: "ses_1" });
-
-    const consolidateCount = trigger.mock.calls.filter(
-      (c) => (c[0] as { function_id: string }).function_id === "mem::consolidate-pipeline",
-    ).length;
-    expect(consolidateCount).toBe(2);
   });
 });

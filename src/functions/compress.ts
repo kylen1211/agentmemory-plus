@@ -11,6 +11,7 @@ import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import {
   COMPRESSION_SYSTEM,
+  EXECUTION_FLOW_COMPRESSION_SYSTEM,
   buildCompressionPrompt,
 } from "../prompts/compression.js";
 import { VISION_DESCRIPTION_PROMPT } from "../prompts/vision.js";
@@ -22,6 +23,9 @@ import { scoreCompression } from "../eval/quality.js";
 import { compressWithRetry } from "../eval/self-correct.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { logger } from "../logger.js";
+import { shouldPruneLowValue } from "./prune.js";
+import { recordAudit } from "./audit.js";
+import { isLowValuePruneDryRun } from "../config.js";
 
 const VALID_TYPES = new Set<string>([
   "file_read",
@@ -108,6 +112,11 @@ export function registerCompressFunction(
         }
       }
 
+      // FR-2 / design.md ADR-5: execution-subject observations get the
+      // slimmed "flow" audit-record prompt (title/facts/narrative only,
+      // no concepts/files) instead of the full compression prompt.
+      const isExecutionFlow = data.raw.subject === "execution";
+
       const prompt = buildCompressionPrompt({
         hookType: data.raw.hookType,
         toolName: data.raw.toolName,
@@ -123,6 +132,10 @@ export function registerCompressFunction(
         const validator = (response: string) => {
           const parsed = parseCompressionXml(response);
           if (!parsed) return { valid: false, errors: ["xml_parse_failed"] };
+          // The flow variant never produces <concepts>/<files> — schema
+          // validation still runs against the same CompressOutputSchema,
+          // which is fine since parseCompressionXml() already defaults
+          // those to empty arrays for absent tags (see below).
           const result = validateOutput(
             CompressOutputSchema,
             parsed,
@@ -135,7 +148,7 @@ export function registerCompressFunction(
 
         const { response, retried } = await compressWithRetry(
           provider,
-          COMPRESSION_SYSTEM,
+          isExecutionFlow ? EXECUTION_FLOW_COMPRESSION_SYSTEM : COMPRESSION_SYSTEM,
           prompt,
           validator,
           1,
@@ -156,6 +169,27 @@ export function registerCompressFunction(
 
         const qualityScore = scoreCompression(parsed);
 
+        // ADR-7 race guard: observe.ts's dedup-hit path can kv.update
+        // repeatCount onto this same record while compression is still
+        // in flight (mem::compress is fired Void() before this response
+        // returns). This kv.set below is a full-record overwrite, so
+        // without reading the current repeatCount first that write would
+        // silently get clobbered back to undefined.
+        let priorRepeatCount: number | undefined;
+        try {
+          const priorRecord = await kv.get<{ repeatCount?: number }>(
+            KV.observations(data.sessionId),
+            data.observationId,
+          );
+          priorRepeatCount = priorRecord?.repeatCount;
+        } catch (err) {
+          logger.warn("Failed to read prior record before compress overwrite", {
+            obsId: data.observationId,
+            sessionId: data.sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
         const compressed: CompressedObservation = {
           id: data.observationId,
           sessionId: data.sessionId,
@@ -166,7 +200,70 @@ export function registerCompressFunction(
           ...(imageDescription ? { imageDescription } : {}),
           ...(data.raw.imageData ? { imageRef: data.raw.imageData } : {}),
           ...(data.raw.agentId ? { agentId: data.raw.agentId } : {}),
+          // FR-1: passthrough, same shape as agentId above.
+          ...(data.raw.subject ? { subject: data.raw.subject } : {}),
+          // FR-6 / ADR-7: carry the dedup-hit counter forward.
+          ...(priorRepeatCount ? { repeatCount: priorRepeatCount } : {}),
+          // FR-2 / design.md ADR-5: this is the "flow" audit-record half
+          // of execution-subject observations (the "self_report" half is
+          // a separate record written by execution-record.ts). violation
+          // is a pure rule-level string comparison on hookType — never
+          // derived from the LLM's XML output above — satisfying PRD
+          // FR-2's "产生路径是规则匹配,不经 LLM 输出解析" judgment.
+          ...(isExecutionFlow
+            ? {
+                executionKind: "flow" as const,
+                ...(data.raw.hookType === "post_tool_failure"
+                  ? { violation: true }
+                  : {}),
+                ...(data.raw.subagentId
+                  ? { subagentId: data.raw.subagentId }
+                  : {}),
+                ...(data.raw.execHookType
+                  ? { execHookType: data.raw.execHookType }
+                  : {}),
+              }
+            : {}),
         };
+
+        // FR-4 bullet 2 / design.md ADR-3: low-value gate sits here —
+        // after `compressed` is assembled, strictly before kv.set. A hit
+        // deletes the observe-stage raw record and returns; kv.set /
+        // getSearchIndex().add() / vectorIndexAddGuarded() below never
+        // run, so a pruned record never produces an index entry.
+        if (shouldPruneLowValue(compressed)) {
+          const dryRun = isLowValuePruneDryRun();
+          await recordAudit(
+            kv,
+            "delete",
+            "mem::compress",
+            [data.observationId],
+            {
+              reason: "low_value",
+              importance: compressed.importance,
+              confidence: compressed.confidence,
+              dryRun,
+            },
+          );
+          if (!dryRun) {
+            await kv.delete(KV.observations(data.sessionId), data.observationId);
+            logger.info("Pruned low-value observation after compression", {
+              obsId: data.observationId,
+              sessionId: data.sessionId,
+              importance: compressed.importance,
+              confidence: compressed.confidence,
+            });
+            return { success: true, pruned: true, reason: "low_value" };
+          }
+          logger.info("Low-value observation flagged (dry-run, not deleted)", {
+            obsId: data.observationId,
+            sessionId: data.sessionId,
+            importance: compressed.importance,
+            confidence: compressed.confidence,
+          });
+          // Dry-run: fall through to the normal persist/index path below
+          // so behavior is unchanged until the dry-run flag is turned off.
+        }
 
         await kv.set(
           KV.observations(data.sessionId),
@@ -174,23 +271,31 @@ export function registerCompressFunction(
           compressed,
         );
 
-        try {
-          getSearchIndex().add(compressed);
-        } catch (err) {
-          logger.warn("Failed to index compressed observation into BM25", {
-            obsId: compressed.id,
-            sessionId: compressed.sessionId,
-            title: compressed.title,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+        // FR-2 hard constraint (design.md ADR-5): execution-subject "flow"
+        // records are never added to BM25 or the vector index — neither
+        // getSearchIndex().add() nor vectorIndexAddGuarded() may be called
+        // for them, full stop. This is the flow-record half of "两类记录
+        // 都只落 KV...不进检索面"; the self_report half enforces the same
+        // rule independently in execution-record.ts.
+        if (!isExecutionFlow) {
+          try {
+            getSearchIndex().add(compressed);
+          } catch (err) {
+            logger.warn("Failed to index compressed observation into BM25", {
+              obsId: compressed.id,
+              sessionId: compressed.sessionId,
+              title: compressed.title,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
 
-        await vectorIndexAddGuarded(
-          compressed.id,
-          compressed.sessionId,
-          compressed.title + " " + (compressed.narrative || ""),
-          { kind: "observation", logId: compressed.id },
-        );
+          await vectorIndexAddGuarded(
+            compressed.id,
+            compressed.sessionId,
+            compressed.title + " " + (compressed.narrative || ""),
+            { kind: "observation", logId: compressed.id },
+          );
+        }
 
         const streamResults = await Promise.allSettled([
           sdk.trigger({

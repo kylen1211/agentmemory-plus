@@ -16,6 +16,7 @@ import {
 } from "../prompts/consolidation.js";
 import { recordAudit } from "./audit.js";
 import { getConsolidationDecayDays, isConsolidationEnabled } from "../config.js";
+import { consolidationDue } from "../state/consolidation-gate.js";
 import { logger } from "../logger.js";
 
 function applyDecay(
@@ -47,10 +48,22 @@ export function registerConsolidationPipelineFunction(
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::consolidate-pipeline", 
+  sdk.registerFunction("mem::consolidate-pipeline",
     async (data?: { tier?: string; force?: boolean; project?: string }) => {
+      // The disabled check must run BEFORE the cooldown gate: in production
+      // CONSOLIDATION_ENABLED=false, so an unforced caller (e.g. a stray
+      // health-check hitting api::consolidate-pipeline with no force) would
+      // otherwise pass the gate, burn the marker, and return "disabled" —
+      // silently eating the next 5-minute window from crontab's real Sunday
+      // POST /reflect for zero work done. force:true (events.ts, evict.ts)
+      // still bypasses only this disabled check, never the gate below.
       if (!data?.force && !isConsolidationEnabled()) {
         return { success: false, skipped: true, reason: "Consolidation disabled: set CONSOLIDATION_ENABLED=true or configure an LLM provider (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY / MINIMAX_API_KEY / OPENAI_BASE_URL / AGENTMEMORY_PROVIDER=agent-sdk)" };
+      }
+      // FR-7 (ADR-9): cooldown gate is unconditional — force only bypasses
+      // the isConsolidationEnabled() check above, not the debounce window.
+      if (!(await consolidationDue(kv))) {
+        return { success: true, skipped: true, reason: "cooldown" };
       }
       const tier = data?.tier || "all";
       const decayDays = getConsolidationDecayDays();
@@ -135,9 +148,14 @@ export function registerConsolidationPipelineFunction(
 
       if (tier === "all" || tier === "reflect") {
         try {
+          // bypassCooldown: this internal call must not be blocked by the
+          // marker the outer consolidationDue() check above just wrote
+          // (FR-7 ADR-9 config action 3) — otherwise the pipeline's own
+          // reflect tier would always self-skip.
           const reflectResult = await sdk.trigger({ function_id: "mem::reflect", payload: {
             maxClusters: 10,
             project: data?.project,
+            bypassCooldown: true,
           } });
           results.reflect = reflectResult;
         } catch (err) {
