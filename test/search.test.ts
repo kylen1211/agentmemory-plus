@@ -121,11 +121,19 @@ describe("mem::search", () => {
     const result = (await sdk.trigger("mem::search", {
       query: "auth",
       format: "compact",
-    })) as { format: string; results: Array<{ obsId: string; title: string }> };
+    })) as {
+      format: string;
+      results: Array<{ obsId: string; title: string; concepts?: string[] }>;
+    };
 
     expect(result.format).toBe("compact");
     expect(result.results[0]?.obsId).toBe("obs_a");
     expect(result.results[0]?.title).toBe("Auth middleware decision");
+    // review Important-1: concepts is functionally required (ADR-3) —
+    // CLI recall level 2 / tags filter client-side on this field. Pin
+    // the transplant so dropping it fails loudly instead of silently
+    // degrading CLI recall to topic-fallback.
+    expect(result.results[0]?.concepts).toEqual(["auth", "jwt"]);
   });
 
   it("returns narrative text and respects token budget", async () => {

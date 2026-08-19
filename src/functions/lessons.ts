@@ -1,8 +1,34 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, fingerprintId } from "../state/schema.js";
-import type { Lesson } from "../types.js";
+import type { CompactLessonResult, Lesson } from "../types.js";
 import { recordAudit } from "./audit.js";
+
+// FR-2 (agentmemory-ref-model ADR-4). Truncation cutoff for the compact
+// lesson-recall form. Value and slicing algorithm are the same as
+// smart-search.ts's LESSON_CONTENT_PREVIEW_CHARS (":73,304-307), but that
+// constant isn't exported and smart-search.ts's diff must stay at zero
+// lines (FR-2 hard constraint) — so this is a same-value local copy, not
+// an import.
+const LESSON_CONTENT_PREVIEW_CHARS = 240;
+
+function toCompactLessonResult(
+  lesson: Lesson,
+  score: number,
+): CompactLessonResult {
+  return {
+    lessonId: lesson.id,
+    content:
+      lesson.content.length > LESSON_CONTENT_PREVIEW_CHARS
+        ? lesson.content.slice(0, LESSON_CONTENT_PREVIEW_CHARS) + "…"
+        : lesson.content,
+    confidence: lesson.confidence,
+    score,
+    createdAt: lesson.createdAt,
+    project: lesson.project,
+    tags: lesson.tags ?? [],
+  };
+}
 
 function reinforceLesson(lesson: Lesson): void {
   const now = new Date().toISOString();
@@ -93,17 +119,36 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::lesson-recall", 
+  sdk.registerFunction("mem::lesson-recall",
     async (data: {
       query: string;
       project?: string;
       agentId?: string;
       minConfidence?: number;
       limit?: number;
+      format?: string;
     }) => {
       if (!data.query?.trim()) {
         return { success: false, error: "query is required" };
       }
+
+      // FR-2 (agentmemory-ref-model ADR-4): the function-level default is
+      // "full" — sdk.trigger-direct callers (smart-search.ts's
+      // recallLessons) never pass format and must keep receiving whole
+      // Lesson objects, since they already do their own 240-char preview
+      // truncation. Only the REST boundary (api::lesson-search) defaults
+      // to "compact" when the caller omits format.
+      if (
+        data.format !== undefined &&
+        data.format !== "full" &&
+        data.format !== "compact"
+      ) {
+        return {
+          success: false,
+          error: "format must be one of: full, compact",
+        };
+      }
+      const format = data.format === "compact" ? "compact" : "full";
 
       const query = data.query.toLowerCase();
       const minConfidence = data.minConfidence ?? 0.1;
@@ -151,17 +196,45 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
         });
       } catch {}
 
-      return {
-        success: true,
-        lessons: scored.slice(0, limit).map((s) => ({
-          ...s.lesson,
-          score: Math.round(s.score * 1000) / 1000,
-        })),
-      };
+      const limited = scored.slice(0, limit);
+      const resultLessons =
+        format === "compact"
+          ? limited.map((s) =>
+              toCompactLessonResult(
+                s.lesson,
+                Math.round(s.score * 1000) / 1000,
+              ),
+            )
+          : limited.map((s) => ({
+              ...s.lesson,
+              score: Math.round(s.score * 1000) / 1000,
+            }));
+
+      return { success: true, format, lessons: resultLessons };
     },
   );
 
-  sdk.registerFunction("mem::lesson-list", 
+  // FR-2 (agentmemory-ref-model ADR-4). Second hop of the two-level
+  // lessons API: fetch one lesson's full content + metadata by id.
+  // Route form mirrors mem::search's by-id sibling (api::memory-by-id):
+  // a plain KV.lessons direct get, softdelete treated as a miss.
+  sdk.registerFunction("mem::lesson-get",
+    async (data: { lessonId: string }) => {
+      if (!data.lessonId?.trim()) {
+        return { success: false, error: "lessonId is required" };
+      }
+
+      const lessonId = data.lessonId.trim();
+      const lesson = await kv.get<Lesson>(KV.lessons, lessonId);
+      if (!lesson || lesson.deleted) {
+        return { success: false, error: `lesson not found: ${lessonId}` };
+      }
+
+      return { success: true, lesson };
+    },
+  );
+
+  sdk.registerFunction("mem::lesson-list",
     async (data: {
       project?: string;
       agentId?: string;

@@ -302,6 +302,11 @@ class AgentMemoryProvider(MemoryProvider):
             result = _api(self._base, "search", {
                 "query": args["query"],
                 "limit": args.get("limit", 10),
+                # FR-1 (agentmemory-ref-model ADR-1): REST /agentmemory/search
+                # now defaults to format=compact when omitted; this consumer
+                # reads obs.narrative/importance below, so pin format=full
+                # explicitly to keep its behavior unchanged.
+                "format": "full",
             })
             if not result:
                 return json.dumps({"results": []})

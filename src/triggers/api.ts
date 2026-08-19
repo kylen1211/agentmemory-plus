@@ -452,10 +452,14 @@ export function registerApiTriggers(
         limit: body.limit as number | undefined,
         project: body.project as string | undefined,
         cwd: body.cwd as string | undefined,
+        // FR-1 (agentmemory-ref-model ADR-1): the REST boundary defaults to
+        // "compact" when the caller omits format; the mem::search function
+        // level default stays "full" (search.ts:472) so sdk.trigger-direct
+        // consumers (enrich/mcp/smart-search) are unaffected.
         format:
           typeof body.format === "string"
             ? body.format.trim().toLowerCase()
-            : undefined,
+            : "compact",
         token_budget: body.token_budget as number | undefined,
         agentId: bodyAgentId ?? queryAgentId,
       };
@@ -2037,11 +2041,45 @@ export function registerApiTriggers(
       if (!id || typeof id !== "string") {
         return { status_code: 400, body: { error: "id path parameter is required" } };
       }
+      // FR-1 (agentmemory-ref-model ADR-2): first probe KV.memories; only
+      // fall back to the session-sharded KV.observations(sessionId) when a
+      // sessionId is supplied. Not resolved by id prefix — sr_obs_* is a
+      // compound prefix that makes prefix-based routing unreliable.
+      //
+      // review Important-3: this is the second hop of the two-hop flow —
+      // mem::search / api::memories already agent-scope-filter what a
+      // caller can discover, so the get-by-id hop must apply the same
+      // filter or it becomes a bypass. Same fail-closed idiom as
+      // api::memories (api.ts:1962-1998): isolated mode pins to the
+      // worker's own AGENT_ID, no query-param override here (unlike the
+      // list endpoints, by-id has no listing use case to opt out for).
+      // A row that exists but is out of scope is treated exactly like a
+      // row that doesn't exist — same 404 shapes, so the response can't
+      // be used to probe existence of another agent's rows.
+      const filterAgentId = isAgentScopeIsolated() ? getAgentId() : undefined;
+      const blockedByScope = (agentId?: string): boolean =>
+        filterAgentId !== undefined && agentId !== filterAgentId;
       const memory = await kv.get<import("../types.js").Memory>(KV.memories, id);
-      if (!memory) {
+      if (memory && !blockedByScope(memory.agentId)) {
+        return { status_code: 200, body: { memory, kind: "memory" } };
+      }
+      const sessionId = asNonEmptyString(req.query_params?.["sessionId"]);
+      if (sessionId) {
+        const observation = await kv.get<CompressedObservation>(
+          KV.observations(sessionId),
+          id,
+        );
+        if (observation && !blockedByScope(observation.agentId)) {
+          return { status_code: 200, body: { memory: observation, kind: "observation" } };
+        }
         return { status_code: 404, body: { error: `memory not found: ${id}` } };
       }
-      return { status_code: 200, body: { memory } };
+      return {
+        status_code: 404,
+        body: {
+          error: `memory not found: ${id} (observation ids need ?sessionId=<sessionId> from the search result)`,
+        },
+      };
     },
   );
   sdk.registerTrigger({
@@ -2357,7 +2395,7 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/actions", http_method: "POST" },
   });
 
-  sdk.registerFunction("api::action-update", 
+  sdk.registerFunction("api::action-update",
     async (
       req: ApiRequest<{
         actionId: string;
@@ -2366,12 +2404,34 @@ export function registerApiTriggers(
         description?: string;
         priority?: number;
         result?: string;
+        appendSourceMemoryIds?: string[];
+        appendSourceObservationIds?: string[];
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       if (!req.body?.actionId) {
         return { status_code: 400, body: { error: "actionId is required" } };
+      }
+      if (
+        req.body.appendSourceMemoryIds !== undefined &&
+        (!Array.isArray(req.body.appendSourceMemoryIds) ||
+          !req.body.appendSourceMemoryIds.every((id: unknown) => typeof id === "string"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "appendSourceMemoryIds must be an array of strings" },
+        };
+      }
+      if (
+        req.body.appendSourceObservationIds !== undefined &&
+        (!Array.isArray(req.body.appendSourceObservationIds) ||
+          !req.body.appendSourceObservationIds.every((id: unknown) => typeof id === "string"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "appendSourceObservationIds must be an array of strings" },
+        };
       }
       const result = await sdk.trigger({ function_id: "mem::action-update", payload: req.body });
       return { status_code: 200, body: result };
@@ -3236,10 +3296,50 @@ export function registerApiTriggers(
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.query || typeof body.query !== "string") return { status_code: 400, body: { error: "query is required" } };
-    const result = await sdk.trigger({ function_id: "mem::lesson-recall", payload: body });
+    // FR-2 (agentmemory-ref-model ADR-4): lessons' format set is two-way
+    // (full/compact) — unlike memory search there's no narrative tier.
+    if (
+      body.format !== undefined &&
+      (typeof body.format !== "string" ||
+        !["full", "compact"].includes(body.format))
+    ) {
+      return {
+        status_code: 400,
+        body: { error: "format must be one of: full, compact" },
+      };
+    }
+    const payload = {
+      ...body,
+      // REST boundary defaults to "compact" when the caller omits format;
+      // the mem::lesson-recall function-level default stays "full" so
+      // sdk.trigger-direct callers (smart-search.ts's recallLessons) are
+      // unaffected (ADR-4).
+      format: typeof body.format === "string" ? body.format : "compact",
+    };
+    const result = await sdk.trigger({ function_id: "mem::lesson-recall", payload });
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-search", config: { api_path: "/agentmemory/lessons/search", http_method: "POST" } });
+
+  sdk.registerFunction("api::lesson-get", async (req: ApiRequest): Promise<Response> => {
+    const denied = checkAuth(req, secret);
+    if (denied) return denied;
+    const lessonId = req.path_params?.["lessonId"];
+    if (!lessonId || typeof lessonId !== "string") {
+      return { status_code: 400, body: { error: "lessonId path parameter is required" } };
+    }
+    // FR-2 (agentmemory-ref-model ADR-4): route form mirrors
+    // GET /agentmemory/memories/{id} (api::memory-by-id above).
+    const result = (await sdk.trigger({
+      function_id: "mem::lesson-get",
+      payload: { lessonId },
+    })) as { success?: boolean; lesson?: unknown; error?: string };
+    if (!result?.success) {
+      return { status_code: 404, body: { error: result?.error ?? `lesson not found: ${lessonId}` } };
+    }
+    return { status_code: 200, body: { success: true, lesson: result.lesson } };
+  });
+  sdk.registerTrigger({ type: "http", function_id: "api::lesson-get", config: { api_path: "/agentmemory/lessons/:lessonId", http_method: "GET" } });
 
   sdk.registerFunction("api::lesson-strengthen",  async (req: ApiRequest) => {
     const denied = checkAuth(req, secret);

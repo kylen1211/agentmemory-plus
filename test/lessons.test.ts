@@ -296,6 +296,143 @@ describe("Lessons", () => {
     });
   });
 
+  // FR-2 (agentmemory-ref-model T-2, ADR-4): function-level format on
+  // mem::lesson-recall. Default stays "full" — this is the hard-constraint
+  // anchor for the sdk.trigger-direct internal consumer (smart-search.ts's
+  // recallLessons), which never passes format and must keep receiving
+  // whole Lesson objects.
+  describe("mem::lesson-recall format", () => {
+    const longContent =
+      "x".repeat(300) + " end of a very long lesson content body";
+
+    beforeEach(async () => {
+      await sdk.trigger("mem::lesson-save", {
+        content: longContent,
+        project: "/app",
+        tags: ["reliability", "timeouts"],
+        confidence: 0.9,
+      });
+    });
+
+    it("defaults to full (whole Lesson, untruncated content) when format is omitted", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "reliability timeouts",
+      })) as { format: string; lessons: Array<Lesson & { score: number }> };
+
+      expect(result.format).toBe("full");
+      expect(result.lessons[0].content).toBe(longContent);
+      expect(result.lessons[0]).toHaveProperty("context");
+      expect(result.lessons[0]).toHaveProperty("sourceIds");
+    });
+
+    it("returns CompactLessonResult shape with 240-char truncation when format=compact", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "reliability timeouts",
+        format: "compact",
+      })) as {
+        format: string;
+        lessons: Array<{
+          lessonId: string;
+          content: string;
+          confidence: number;
+          score: number;
+          createdAt: string;
+          project?: string;
+          tags: string[];
+        }>;
+      };
+
+      expect(result.format).toBe("compact");
+      const l = result.lessons[0];
+      expect(l.content.length).toBe(241);
+      expect(l.content.endsWith("…")).toBe(true);
+      expect(l.content).toBe(longContent.slice(0, 240) + "…");
+      expect(l).not.toHaveProperty("context");
+      expect(l).not.toHaveProperty("sourceIds");
+      expect(l.tags).toEqual(["reliability", "timeouts"]);
+      expect(typeof l.lessonId).toBe("string");
+    });
+
+    it("does not truncate content shorter than the 240-char cutoff in compact mode", async () => {
+      await sdk.trigger("mem::lesson-save", {
+        content: "concise pattern noted",
+        tags: ["short-tag"],
+      });
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "concise pattern noted",
+        format: "compact",
+      })) as { lessons: Array<{ content: string }> };
+
+      expect(result.lessons.length).toBe(1);
+      expect(result.lessons[0].content).toBe("concise pattern noted");
+    });
+
+    it("rejects an invalid format value", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "reliability",
+        format: "narrative",
+      })) as { success: boolean; error?: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("format must be one of: full, compact");
+    });
+  });
+
+  describe("mem::lesson-get", () => {
+    it("returns the full lesson including untruncated content and metadata", async () => {
+      const longContent = "y".repeat(500);
+      const saved = (await sdk.trigger("mem::lesson-save", {
+        content: longContent,
+        context: "some context",
+        tags: ["a", "b"],
+        confidence: 0.7,
+      })) as { lesson: Lesson };
+
+      const result = (await sdk.trigger("mem::lesson-get", {
+        lessonId: saved.lesson.id,
+      })) as { success: boolean; lesson: Lesson };
+
+      expect(result.success).toBe(true);
+      expect(result.lesson.id).toBe(saved.lesson.id);
+      expect(result.lesson.content).toBe(longContent);
+      expect(result.lesson.context).toBe("some context");
+      expect(result.lesson.tags).toEqual(["a", "b"]);
+    });
+
+    it("returns not found for a nonexistent lessonId", async () => {
+      const result = (await sdk.trigger("mem::lesson-get", {
+        lessonId: "lsn_definitely_not_exist",
+      })) as { success: boolean; error?: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("lesson not found: lsn_definitely_not_exist");
+    });
+
+    it("returns not found for a soft-deleted lesson", async () => {
+      const saved = (await sdk.trigger("mem::lesson-save", {
+        content: "Deleted lesson content",
+      })) as { lesson: Lesson };
+      await sdk.trigger("mem::lesson-delete", { lessonId: saved.lesson.id });
+
+      const result = (await sdk.trigger("mem::lesson-get", {
+        lessonId: saved.lesson.id,
+      })) as { success: boolean; error?: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(`lesson not found: ${saved.lesson.id}`);
+    });
+
+    it("rejects a missing lessonId", async () => {
+      const result = (await sdk.trigger("mem::lesson-get", {})) as {
+        success: boolean;
+        error?: string;
+      };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("lessonId is required");
+    });
+  });
+
   describe("mem::lesson-list", () => {
     beforeEach(async () => {
       await sdk.trigger("mem::lesson-save", { content: "Lesson A", confidence: 0.9, project: "/app" });

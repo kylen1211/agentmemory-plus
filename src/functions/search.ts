@@ -648,6 +648,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           type: r.observation.type,
           score: r.score,
           timestamp: r.observation.timestamp,
+          concepts: r.observation.concepts,
         }))
         const packed = applyTokenBudget(compactResults)
         return {

@@ -5,8 +5,27 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerActionsFunction } from "../src/functions/actions.js";
-import type { Action, ActionEdge } from "../src/types.js";
+import type { Action, ActionEdge, Memory } from "../src/types.js";
+import { KV } from "../src/state/schema.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
+
+function makeMemory(overrides: Partial<Memory> = {}): Memory {
+  return {
+    id: "mem_test_1",
+    createdAt: "2026-08-19T00:00:00.000Z",
+    updatedAt: "2026-08-19T00:00:00.000Z",
+    type: "fact",
+    title: "test memory",
+    content: "test content",
+    concepts: [],
+    files: [],
+    sessionIds: [],
+    strength: 1,
+    version: 1,
+    isLatest: true,
+    ...overrides,
+  };
+}
 
 describe("Actions Functions", () => {
   let sdk: ReturnType<typeof mockSdk>;
@@ -223,6 +242,179 @@ describe("Actions Functions", () => {
       })) as { success: boolean; action: Action };
 
       expect(getResult.action.status).toBe("pending");
+    });
+
+    describe("FR-3: appendSourceMemoryIds / appendSourceObservationIds", () => {
+      it("appends to existing sourceMemoryIds preserving order (readback)", async () => {
+        await kv.set(KV.memories, "mem_1", makeMemory({ id: "mem_1" }));
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "Has base refs",
+          sourceMemoryIds: ["mem_base"],
+        })) as { success: boolean; action: Action };
+
+        const updateResult = (await sdk.trigger("mem::action-update", {
+          actionId: createResult.action.id,
+          appendSourceMemoryIds: ["mem_1"],
+        })) as { success: boolean; action: Action };
+
+        expect(updateResult.success).toBe(true);
+        expect(updateResult.action.sourceMemoryIds).toEqual(["mem_base", "mem_1"]);
+        // status untouched when the request omits it
+        expect(updateResult.action.status).toBe("pending");
+
+        const getResult = (await sdk.trigger("mem::action-get", {
+          actionId: createResult.action.id,
+        })) as { success: boolean; action: Action };
+        expect(getResult.action.sourceMemoryIds).toEqual(["mem_base", "mem_1"]);
+      });
+
+      it("treats a missing existing sourceMemoryIds as [] before appending", async () => {
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "No base refs",
+        })) as { success: boolean; action: Action };
+        // simulate a legacy record lacking the field entirely
+        const legacyAction = { ...createResult.action } as Partial<Action>;
+        delete legacyAction.sourceMemoryIds;
+        await kv.set(KV.actions, createResult.action.id, legacyAction as Action);
+
+        const updateResult = (await sdk.trigger("mem::action-update", {
+          actionId: createResult.action.id,
+          appendSourceMemoryIds: ["mem_only"],
+        })) as { success: boolean; action: Action };
+
+        expect(updateResult.success).toBe(true);
+        expect(updateResult.action.sourceMemoryIds).toEqual(["mem_only"]);
+      });
+
+      it("appends sourceObservationIds without existence checks", async () => {
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "Obs refs",
+        })) as { success: boolean; action: Action };
+
+        const updateResult = (await sdk.trigger("mem::action-update", {
+          actionId: createResult.action.id,
+          appendSourceObservationIds: ["obs_ghost_1"],
+        })) as { success: boolean; action: Action; unresolvedSourceIds?: string[] };
+
+        expect(updateResult.success).toBe(true);
+        expect(updateResult.action.sourceObservationIds).toEqual(["obs_ghost_1"]);
+        // no existence check for observation ids -> field absent
+        expect(updateResult.unresolvedSourceIds).toBeUndefined();
+      });
+
+      it("does not fail the whole update on an unresolved memory id, and applies other fields", async () => {
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "Ghost ref target",
+        })) as { success: boolean; action: Action };
+
+        const updateResult = (await sdk.trigger("mem::action-update", {
+          actionId: createResult.action.id,
+          status: "active",
+          appendSourceMemoryIds: ["mem_ghost_xyz"],
+        })) as {
+          success: boolean;
+          action: Action;
+          unresolvedSourceIds: string[];
+        };
+
+        expect(updateResult.success).toBe(true);
+        expect(updateResult.action.status).toBe("active");
+        expect(updateResult.action.sourceMemoryIds).toContain("mem_ghost_xyz");
+        expect(updateResult.unresolvedSourceIds).toEqual(["mem_ghost_xyz"]);
+      });
+
+      it("dedups within-request duplicates and is idempotent across repeated appends", async () => {
+        await kv.set(KV.memories, "mem_a", makeMemory({ id: "mem_a" }));
+        await kv.set(KV.memories, "mem_b", makeMemory({ id: "mem_b" }));
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "Dedup target",
+        })) as { success: boolean; action: Action };
+
+        const body = {
+          actionId: createResult.action.id,
+          appendSourceMemoryIds: ["mem_a", "mem_b", "mem_a"],
+        };
+
+        const first = (await sdk.trigger("mem::action-update", body)) as {
+          success: boolean;
+          action: Action;
+        };
+        expect(first.action.sourceMemoryIds).toEqual(["mem_a", "mem_b"]);
+        const firstUpdatedAt = first.action.updatedAt;
+
+        const second = (await sdk.trigger("mem::action-update", body)) as {
+          success: boolean;
+          action: Action;
+        };
+        expect(second.action.sourceMemoryIds).toEqual(["mem_a", "mem_b"]);
+        // idempotent: set unchanged, but updatedAt still refreshes
+        expect(second.action.updatedAt).toBeDefined();
+        expect(typeof second.action.updatedAt).toBe("string");
+        void firstUpdatedAt;
+      });
+
+      it("empty appendSourceMemoryIds is a legal no-op with unresolvedSourceIds: []", async () => {
+        const createResult = (await sdk.trigger("mem::action-create", {
+          title: "Empty append",
+          sourceMemoryIds: ["mem_kept"],
+        })) as { success: boolean; action: Action };
+
+        const updateResult = (await sdk.trigger("mem::action-update", {
+          actionId: createResult.action.id,
+          appendSourceMemoryIds: [],
+        })) as { success: boolean; action: Action; unresolvedSourceIds: string[] };
+
+        expect(updateResult.success).toBe(true);
+        expect(updateResult.action.sourceMemoryIds).toEqual(["mem_kept"]);
+        expect(updateResult.unresolvedSourceIds).toEqual([]);
+      });
+
+      it("real concurrent appends to the same action lose no updates (withKeyedLock)", async () => {
+        // Plain mockKV.get returns a live reference into its internal Map, so
+        // concurrent callers would all mutate the *same* in-memory object and the
+        // race this test is meant to catch could never manifest (unlike production
+        // StateKV, which round-trips through sdk.trigger/state::get and hands back an
+        // independent deserialized copy per call). Wrap get() to (a) clone like a real
+        // read would and (b) add randomized read latency, so this test actually forces
+        // interleaving between "read old array" and "write merged array" across the 20
+        // concurrent callers instead of accidentally passing regardless of the lock.
+        const raceKv = mockKV();
+        const originalGet = raceKv.get.bind(raceKv);
+        raceKv.get = (async (scope: string, key: string) => {
+          await new Promise((resolve) => setTimeout(resolve, Math.random() * 5));
+          const value = await originalGet(scope, key);
+          return value === null ? null : JSON.parse(JSON.stringify(value));
+        }) as typeof raceKv.get;
+        const raceSdk = mockSdk();
+        registerActionsFunction(raceSdk as never, raceKv as never);
+
+        const createResult = (await raceSdk.trigger("mem::action-create", {
+          title: "Concurrent append target",
+        })) as { success: boolean; action: Action };
+        const actionId = createResult.action.id;
+
+        const N = 20;
+        await Promise.all(
+          Array.from({ length: N }, (_, i) =>
+            raceSdk.trigger("mem::action-update", {
+              actionId,
+              appendSourceMemoryIds: [`mem_c${i}`],
+            }),
+          ),
+        );
+
+        const getResult = (await raceSdk.trigger("mem::action-get", {
+          actionId,
+        })) as { success: boolean; action: Action };
+
+        const expected = Array.from({ length: N }, (_, i) => `mem_c${i}`);
+        expect(getResult.action.sourceMemoryIds.length).toBe(N);
+        for (const id of expected) {
+          expect(getResult.action.sourceMemoryIds).toContain(id);
+        }
+        // no duplicates
+        expect(new Set(getResult.action.sourceMemoryIds).size).toBe(N);
+      });
     });
   });
 

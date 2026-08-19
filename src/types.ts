@@ -344,6 +344,12 @@ export interface CompactSearchResult {
   type: ObservationType;
   score: number;
   timestamp: string;
+  // NEW (FR-1, agentmemory-ref-model ADR-3). Optional: shared with
+  // mem::smart-search's compact output, which does not populate it.
+  // Existence is functionally required, not decorative — agent-mem CLI's
+  // second-tier recall filter and the tags subcommand filter client-side
+  // on observation.concepts; without this field those paths break.
+  concepts?: string[];
 }
 
 export interface CompactLessonResult {

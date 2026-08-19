@@ -2,8 +2,21 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import type { Action, ActionEdge } from "../types.js";
+import type { Action, ActionEdge, Memory } from "../types.js";
 import { recordAudit } from "./audit.js";
+
+/** 去重且保留首次出现位置的顺序(FR-3 追加合并语义)。 */
+function dedupPreserveOrder(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      result.push(id);
+    }
+  }
+  return result;
+}
 
 export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::action-create", 
@@ -97,7 +110,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::action-update", 
+  sdk.registerFunction("mem::action-update",
     async (data: {
       actionId: string;
       status?: Action["status"];
@@ -107,12 +120,16 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       assignedTo?: string;
       result?: string;
       tags?: string[];
+      appendSourceMemoryIds?: string[];
+      appendSourceObservationIds?: string[];
     }) => {
       if (!data.actionId) {
         return { success: false, error: "actionId is required" };
       }
 
       return withKeyedLock(`mem:action:${data.actionId}`, async () => {
+        // 并发保证依赖单进程部署的进程内锁(withKeyedLock/keyed-mutex.ts):
+        // 读旧值、求并集、写新值全程不释放锁,同一 actionId 的并发追加在此串行化。
         const action = await kv.get<Action>(KV.actions, data.actionId);
         if (!action) {
           return { success: false, error: "action not found" };
@@ -128,6 +145,27 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
         if (data.assignedTo !== undefined) action.assignedTo = data.assignedTo;
         if (data.result !== undefined) action.result = data.result;
         if (data.tags !== undefined) action.tags = data.tags;
+
+        let unresolvedSourceIds: string[] | undefined;
+        if (data.appendSourceMemoryIds !== undefined) {
+          const dedupedAppend = dedupPreserveOrder(data.appendSourceMemoryIds);
+          unresolvedSourceIds = [];
+          for (const id of dedupedAppend) {
+            const mem = await kv.get<Memory>(KV.memories, id);
+            if (!mem) unresolvedSourceIds.push(id);
+          }
+          action.sourceMemoryIds = dedupPreserveOrder([
+            ...(action.sourceMemoryIds || []),
+            ...dedupedAppend,
+          ]);
+        }
+        if (data.appendSourceObservationIds !== undefined) {
+          action.sourceObservationIds = dedupPreserveOrder([
+            ...(action.sourceObservationIds || []),
+            ...dedupPreserveOrder(data.appendSourceObservationIds),
+          ]);
+        }
+
         action.updatedAt = new Date().toISOString();
 
         await kv.set(KV.actions, action.id, action);
@@ -141,7 +179,9 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
           await propagateCompletion(kv, action.id);
         }
 
-        return { success: true, action };
+        return unresolvedSourceIds !== undefined
+          ? { success: true, action, unresolvedSourceIds }
+          : { success: true, action };
       });
     },
   );
