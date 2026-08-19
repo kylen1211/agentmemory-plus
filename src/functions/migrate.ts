@@ -8,8 +8,17 @@ import type {
   Session,
   CompressedObservation,
   SessionSummary,
+  Lesson,
 } from "../types.js";
 import { logger } from "../logger.js";
+import {
+  rebuildIndex,
+  getSearchIndex,
+  getVectorIndex,
+  getEmbeddingProvider,
+  setEmbeddingProvider,
+  flushIndexSave,
+} from "./search.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
@@ -85,15 +94,261 @@ export async function inferMemoryProjects(
   return { updated, skipped, ambiguous };
 }
 
+export interface BackfillAgentIdMatch {
+  id: string;
+  concepts: string[];
+  content: string;
+  agentId: string;
+}
+
+// Backfill Memory.agentId from concepts[0] when it matches a caller-supplied
+// allowlist of known agent names. Only touches memories with no agentId set
+// and whose first concept is an exact allowlist match — never guesses.
+// Returns { matched, updated, skipped } — safe to run repeatedly (idempotent).
+export async function backfillAgentIds(
+  kv: StateKV,
+  allowlist: string[],
+  dryRun = true,
+): Promise<{
+  matched: number;
+  updated: number;
+  skipped: number;
+  matches: BackfillAgentIdMatch[];
+}> {
+  const allowedSet = new Set(allowlist);
+  const memories = await kv.list<Memory>(KV.memories);
+
+  let matched = 0;
+  let updated = 0;
+  let skipped = 0;
+  const matches: BackfillAgentIdMatch[] = [];
+
+  for (const memory of memories) {
+    if (memory.agentId) {
+      skipped++;
+      continue;
+    }
+
+    const candidate = memory.concepts?.[0];
+    if (!candidate || !allowedSet.has(candidate)) {
+      skipped++;
+      continue;
+    }
+
+    matched++;
+    matches.push({
+      id: memory.id,
+      concepts: memory.concepts,
+      content: (memory.content || "").slice(0, 80),
+      agentId: candidate,
+    });
+
+    if (!dryRun) {
+      memory.agentId = candidate;
+      await kv.set(KV.memories, memory.id, memory);
+      updated++;
+    }
+  }
+
+  logger.info("backfillAgentIds complete", {
+    matched,
+    updated,
+    skipped,
+    dryRun,
+    allowlistSize: allowlist.length,
+  });
+  return { matched, updated, skipped, matches };
+}
+
+export interface BackfillLessonAgentIdMatch {
+  id: string;
+  tags: string[];
+  content: string;
+  agentId: string;
+}
+
+export interface AmbiguousLessonAgentIdMatch {
+  id: string;
+  tags: string[];
+  content: string;
+}
+
+// Backfill Lesson.agentId from tags when exactly one tag matches the
+// caller-supplied allowlist of known agent names. Lesson tags are a
+// concatenation of an agent_tag prefix and free-form extra_tags with no
+// guaranteed order (CLI-side), so we can't rely on position (unlike
+// backfillAgentIds' concepts[0]) — an exact single-match intersection is
+// the only unambiguous signal. Zero matches => skip; more than one match
+// => leave for human triage via `ambiguousMatches`.
+// Returns { matched, updated, skipped, ambiguous } — safe to run repeatedly
+// (idempotent).
+export async function backfillLessonAgentIds(
+  kv: StateKV,
+  allowlist: string[],
+  dryRun = true,
+): Promise<{
+  matched: number;
+  updated: number;
+  skipped: number;
+  ambiguous: number;
+  matches: BackfillLessonAgentIdMatch[];
+  ambiguousMatches: AmbiguousLessonAgentIdMatch[];
+}> {
+  const allowedSet = new Set(allowlist);
+  const lessons = await kv.list<Lesson>(KV.lessons);
+
+  let matched = 0;
+  let updated = 0;
+  let skipped = 0;
+  let ambiguous = 0;
+  const matches: BackfillLessonAgentIdMatch[] = [];
+  const ambiguousMatches: AmbiguousLessonAgentIdMatch[] = [];
+
+  for (const lesson of lessons) {
+    if (lesson.agentId) {
+      skipped++;
+      continue;
+    }
+
+    const tags = lesson.tags ?? [];
+    const intersection = [...new Set(tags.filter((t) => allowedSet.has(t)))];
+
+    if (intersection.length === 0) {
+      skipped++;
+      continue;
+    }
+
+    if (intersection.length > 1) {
+      ambiguous++;
+      ambiguousMatches.push({
+        id: lesson.id,
+        tags,
+        content: (lesson.content || "").slice(0, 80),
+      });
+      continue;
+    }
+
+    const candidate = intersection[0];
+    matched++;
+    matches.push({
+      id: lesson.id,
+      tags,
+      content: (lesson.content || "").slice(0, 80),
+      agentId: candidate,
+    });
+
+    if (!dryRun) {
+      lesson.agentId = candidate;
+      await kv.set(KV.lessons, lesson.id, lesson);
+      updated++;
+    }
+  }
+
+  logger.info("backfillLessonAgentIds complete", {
+    matched,
+    updated,
+    skipped,
+    ambiguous,
+    dryRun,
+    allowlistSize: allowlist.length,
+  });
+  return { matched, updated, skipped, ambiguous, matches, ambiguousMatches };
+}
+
 export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::migrate",
-    async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
+    async (data: {
+      dbPath?: string;
+      step?: string;
+      dryRun?: boolean;
+      agentAllowlist?: string[];
+      skipVector?: boolean;
+    }) => {
       // In-place KV migration steps (no SQLite dependency).
       if (data.step === "infer-memory-projects") {
         const dryRun = data.dryRun ?? false;
         logger.info("Migration step: infer-memory-projects", { dryRun });
         const result = await inferMemoryProjects(kv, dryRun);
         return { success: true, step: "infer-memory-projects", ...result };
+      }
+
+      if (data.step === "backfill-agent-ids") {
+        const dryRun = data.dryRun ?? true;
+        const allowlist = Array.isArray(data.agentAllowlist)
+          ? data.agentAllowlist.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+          : [];
+        if (allowlist.length === 0) {
+          return {
+            success: false,
+            error: "agentAllowlist (non-empty string array) is required for backfill-agent-ids",
+          };
+        }
+        logger.info("Migration step: backfill-agent-ids", { dryRun, allowlistSize: allowlist.length });
+        const result = await backfillAgentIds(kv, allowlist, dryRun);
+        return { success: true, step: "backfill-agent-ids", dryRun, ...result };
+      }
+
+      if (data.step === "backfill-lesson-agent-ids") {
+        const dryRun = data.dryRun ?? true;
+        const allowlist = Array.isArray(data.agentAllowlist)
+          ? data.agentAllowlist.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+          : [];
+        if (allowlist.length === 0) {
+          return {
+            success: false,
+            error: "agentAllowlist (non-empty string array) is required for backfill-lesson-agent-ids",
+          };
+        }
+        logger.info("Migration step: backfill-lesson-agent-ids", { dryRun, allowlistSize: allowlist.length });
+        const result = await backfillLessonAgentIds(kv, allowlist, dryRun);
+        return { success: true, step: "backfill-lesson-agent-ids", dryRun, ...result };
+      }
+
+      if (data.step === "rebuild-search-index") {
+        // 2026-08-19 incident: there was no admin-triggerable entry point
+        // to force a full BM25/vector rebuild from source data — only an
+        // automatic boot-time trigger (index.ts `needsRebuild`) and a
+        // lazy cold-start trigger inside mem::search, both gated on the
+        // in-memory index already being empty. A partially-recovered
+        // index (non-zero size, but stale/incomplete relative to KV —
+        // e.g. left over from an interrupted prior rebuild) never
+        // re-triggers either path, so it stays silently stale forever.
+        // This step reuses the exact same `rebuildIndex` used by both
+        // automatic paths and persists the result immediately (not on
+        // the 5s debounce) so an operator gets a synchronous, verifiable
+        // recovery action instead of having to restart-and-hope.
+        //
+        // skipVector: same incident — the embedding backend itself can
+        // be down (confirmed: a stale SSH tunnel to a local Ollama
+        // instance) while BM25 recovery is still perfectly possible.
+        // Without this escape hatch, the ~60s-per-batch embed timeout
+        // multiplied across the full corpus turns a fast, purely local
+        // BM25 rebuild into an hours-long one gated on a dependency
+        // that's confirmed unavailable. Temporarily clearing the
+        // embedding provider makes `indexRecords`' `vectorEnabled` check
+        // false for the duration of this call only; the live provider
+        // (if any) is restored in `finally` regardless of outcome so
+        // normal mem::observe/mem::remember vector writes resume
+        // immediately after.
+        const skipVector = data.skipVector === true;
+        logger.info("Migration step: rebuild-search-index", { skipVector });
+        const savedProvider = getEmbeddingProvider();
+        if (skipVector) setEmbeddingProvider(null);
+        let indexed: number;
+        try {
+          indexed = await rebuildIndex(kv);
+        } finally {
+          if (skipVector) setEmbeddingProvider(savedProvider);
+        }
+        await flushIndexSave();
+        return {
+          success: true,
+          step: "rebuild-search-index",
+          skipVector,
+          indexed,
+          bm25Size: getSearchIndex().size,
+          vectorSize: getVectorIndex()?.size ?? null,
+        };
       }
 
       if (!data.dbPath) {

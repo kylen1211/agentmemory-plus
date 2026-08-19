@@ -22,6 +22,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       context?: string;
       confidence?: number;
       project?: string;
+      agentId?: string;
       tags?: string[];
       source?: "crystal" | "manual" | "consolidation";
       sourceIds?: string[];
@@ -37,6 +38,11 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
         reinforceLesson(existing);
         if (data.context && !existing.context) {
           existing.context = data.context;
+        }
+        // Backfill agentId when the existing lesson has none — never
+        // overwrite an agentId that was already recorded.
+        if (!existing.agentId && data.agentId) {
+          existing.agentId = data.agentId;
         }
         await kv.set(KV.lessons, existing.id, existing);
 
@@ -70,6 +76,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
         source: data.source || "manual",
         sourceIds: data.sourceIds || [],
         project: data.project,
+        agentId: data.agentId,
         tags: data.tags || [],
         createdAt: now,
         updatedAt: now,
@@ -90,6 +97,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
     async (data: {
       query: string;
       project?: string;
+      agentId?: string;
       minConfidence?: number;
       limit?: number;
     }) => {
@@ -109,6 +117,9 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
 
       if (data.project) {
         lessons = lessons.filter((l) => l.project === data.project);
+      }
+      if (data.agentId) {
+        lessons = lessons.filter((l) => l.agentId === data.agentId);
       }
 
       const scored = lessons
@@ -153,6 +164,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::lesson-list", 
     async (data: {
       project?: string;
+      agentId?: string;
       source?: string;
       minConfidence?: number;
       limit?: number;
@@ -167,6 +179,9 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
 
       if (data.project) {
         lessons = lessons.filter((l) => l.project === data.project);
+      }
+      if (data.agentId) {
+        lessons = lessons.filter((l) => l.agentId === data.agentId);
       }
       if (data.source) {
         lessons = lessons.filter((l) => l.source === data.source);

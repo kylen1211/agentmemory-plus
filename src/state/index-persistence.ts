@@ -105,21 +105,39 @@ export class IndexPersistence {
   async load(): Promise<{
     bm25: SearchIndex | null;
     vector: VectorIndex | null;
+    // True when a manifest for this index type WAS found on disk but
+    // couldn't be turned into usable data (missing/mismatched shard,
+    // malformed manifest) — as opposed to `xxx === null` because nothing
+    // was ever persisted (fresh install, no embedding provider
+    // configured at write time, etc). The 2026-08-19 incident showed
+    // this distinction matters: `bm25.size === 0` alone can't tell a
+    // caller "there was real data here that we lost" from "nothing to
+    // rebuild"; without it, the vector side of a genuine shard-loss (as
+    // opposed to bm25's, which happens to double as the sole rebuild
+    // trigger) silently stayed empty forever because the boot-time
+    // rebuild only checked bm25 size.
+    bm25LoadFailed: boolean;
+    vectorLoadFailed: boolean;
   }> {
     let bm25: SearchIndex | null = null;
     let vector: VectorIndex | null = null;
 
-    const bm25Data = await this.loadBm25Data();
-    if (bm25Data && typeof bm25Data === "string") {
-      bm25 = SearchIndex.deserialize(bm25Data);
+    const bm25Result = await this.loadBm25Data();
+    if (bm25Result.data && typeof bm25Result.data === "string") {
+      bm25 = SearchIndex.deserialize(bm25Result.data);
     }
 
-    const vecData = await this.loadVectorData();
-    if (vecData && typeof vecData === "string") {
-      vector = VectorIndex.deserialize(vecData);
+    const vecResult = await this.loadVectorData();
+    if (vecResult.data && typeof vecResult.data === "string") {
+      vector = VectorIndex.deserialize(vecResult.data);
     }
 
-    return { bm25, vector };
+    return {
+      bm25,
+      vector,
+      bm25LoadFailed: bm25Result.failed,
+      vectorLoadFailed: vecResult.failed,
+    };
   }
 
   stop(): void {
@@ -338,11 +356,11 @@ export class IndexPersistence {
     });
   }
 
-  private async loadBm25Data(): Promise<string | null> {
+  private async loadBm25Data(): Promise<{ data: string | null; failed: boolean }> {
     return this.loadShardedData(BM25_KEY, BM25_MANIFEST_KEY, "BM25");
   }
 
-  private async loadVectorData(): Promise<string | null> {
+  private async loadVectorData(): Promise<{ data: string | null; failed: boolean }> {
     return this.loadShardedData(VECTOR_KEY, VECTOR_MANIFEST_KEY, "vector");
   }
 
@@ -350,14 +368,14 @@ export class IndexPersistence {
     legacyKey: string,
     manifestKey: string,
     label: string,
-  ): Promise<string | null> {
+  ): Promise<{ data: string | null; failed: boolean }> {
     const manifest = await this.readIndexValue<IndexShardManifest>(
       KV.bm25Index,
       manifestKey,
       label,
       "manifest",
     );
-    if (!manifest.ok) return null;
+    if (!manifest.ok) return { data: null, failed: false };
     // #797: some iii-state adapters return `undefined` (not `null`) for
     // a missing key. The previous `value !== null` check passed
     // undefined through to loadManifestData, which then crashed on
@@ -368,7 +386,12 @@ export class IndexPersistence {
       manifest.value != null &&
       typeof manifest.value === "object"
     ) {
-      return this.loadManifestData(manifest.value, label);
+      const data = await this.loadManifestData(manifest.value, label);
+      // A manifest was present (real prior persistence) but couldn't be
+      // turned into usable data — this is data loss on the cache, not a
+      // fresh install. Distinct from every `data: null` path below,
+      // where nothing was ever persisted in the first place.
+      return { data, failed: data === null };
     }
 
     const legacy = await this.readIndexValue<string>(
@@ -377,9 +400,11 @@ export class IndexPersistence {
       label,
       "legacy",
     );
-    if (!legacy.ok) return null;
-    if (legacy.value && typeof legacy.value === "string") return legacy.value;
-    return null;
+    if (!legacy.ok) return { data: null, failed: false };
+    if (legacy.value && typeof legacy.value === "string") {
+      return { data: legacy.value, failed: false };
+    }
+    return { data: null, failed: false };
   }
 
   private async readIndexValue<T>(
@@ -404,6 +429,14 @@ export class IndexPersistence {
     manifest: IndexShardManifest,
     label: string,
   ): Promise<string | null> {
+    // Everything below signals the persisted snapshot is unusable and this
+    // index type falls back to a full source-data rebuild (index.ts:
+    // `needsRebuild` when bm25.size === 0 after load, or vector staying
+    // unpopulated). That's real, if self-healing, data loss on the
+    // persisted cache — log at error, not warn, so it isn't lost in
+    // routine noise and an operator can tell something actually broke
+    // (vs. a first-boot cold start, which never reaches this function at
+    // all since there's no manifest yet).
     if (
       manifest.v !== 1 ||
       !Array.isArray(manifest.shards) ||
@@ -411,12 +444,12 @@ export class IndexPersistence {
       !Number.isInteger(manifest.chars) ||
       manifest.chars < 0
     ) {
-      logger.warn(`index persistence: ${label} shard manifest invalid`);
+      logger.error(`index persistence: ${label} shard manifest invalid — falling back to full rebuild from source data`);
       return null;
     }
     for (const shard of manifest.shards) {
       if (!isValidShardDescriptor(shard)) {
-        logger.warn(`index persistence: ${label} shard manifest invalid`);
+        logger.error(`index persistence: ${label} shard manifest invalid — falling back to full rebuild from source data`);
         return null;
       }
     }
@@ -430,14 +463,14 @@ export class IndexPersistence {
     let chars = 0;
     for (const { shard, chunk } of loadedShards) {
       if (typeof chunk !== "string") {
-        logger.warn(`index persistence: ${label} shard missing`, {
+        logger.error(`index persistence: ${label} shard missing — falling back to full rebuild from source data`, {
           scope: shard.scope,
           key: shard.key,
         });
         return null;
       }
       if (chunk.length !== shard.chars) {
-        logger.warn(`index persistence: ${label} shard length mismatch`, {
+        logger.error(`index persistence: ${label} shard length mismatch — falling back to full rebuild from source data`, {
           scope: shard.scope,
           key: shard.key,
           expected: shard.chars,
@@ -449,7 +482,7 @@ export class IndexPersistence {
       chars += chunk.length;
     }
     if (chars !== manifest.chars) {
-      logger.warn(`index persistence: ${label} total length mismatch`, {
+      logger.error(`index persistence: ${label} total length mismatch — falling back to full rebuild from source data`, {
         expected: manifest.chars,
         actual: chars,
       });

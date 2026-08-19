@@ -1120,7 +1120,13 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::migrate",
     async (
-      req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
+      req: ApiRequest<{
+        dbPath?: string;
+        step?: string;
+        dryRun?: boolean;
+        agentAllowlist?: string[];
+        skipVector?: boolean;
+      }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -1140,6 +1146,8 @@ export function registerApiTriggers(
           ...(req.body.step !== undefined && { step: req.body.step }),
           ...(req.body.dbPath !== undefined && { dbPath: req.body.dbPath }),
           ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
+          ...(req.body.agentAllowlist !== undefined && { agentAllowlist: req.body.agentAllowlist }),
+          ...(req.body.skipVector !== undefined && { skipVector: req.body.skipVector }),
         },
       });
       return { status_code: 200, body: result };
@@ -3184,6 +3192,7 @@ export function registerApiTriggers(
         context: body.context || "",
         confidence: typeof body.confidence === "number" ? body.confidence : undefined,
         project: typeof body.project === "string" ? body.project : undefined,
+        agentId: typeof body.agentId === "string" ? body.agentId : undefined,
         tags,
         source: "manual",
       },
@@ -3213,6 +3222,7 @@ export function registerApiTriggers(
     }
     const result = await sdk.trigger({ function_id: "mem::lesson-list", payload: {
       project: params.project,
+      agentId: params.agentId,
       source: params.source,
       minConfidence,
       limit,

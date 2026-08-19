@@ -287,6 +287,39 @@ export async function indexRecords(
   return count
 }
 
+// A single stuck `kv.list()` call (e.g. one corrupted/oversized session
+// scope) used to be able to wedge the entire background rebuild forever:
+// nothing downstream had a timeout, so `await` on that one call never
+// returned and the fire-and-forget rebuild kicked off at boot (index.ts)
+// silently never finished, logged nothing, and left the corpus it hadn't
+// reached yet permanently unsearchable. Bound every KV read in the walk
+// so one bad scope degrades (skip + log) instead of hanging the whole
+// rebuild. 15s is generous headroom over the iii engine's own ~8s
+// default invocation deadline (see the LIVE_ENUMERATION_BUDGET_MS note
+// in graph.ts) — long enough that a merely-slow read still succeeds,
+// short enough that a genuine hang surfaces in well under a minute of
+// wall-clock time across a realistic session count.
+const REBUILD_KV_TIMEOUT_MS = 15_000
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`${label}: exceeded ${ms}ms budget`)),
+      ms,
+    )
+    p.then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      (err) => {
+        clearTimeout(t)
+        reject(err)
+      },
+    )
+  })
+}
+
 export async function rebuildIndex(kv: StateKV): Promise<number> {
   const idx = getSearchIndex()
   idx.clear()
@@ -300,29 +333,61 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   // Memories live in their own KV scope outside per-session observation
   // scopes, so they need a separate walk. Without this, mem::remember
   // entries vanish from BM25 on every restart even after the live-write
-  // fix in remember.ts.
+  // fix in remember.ts. Indexed FIRST (ahead of the potentially much
+  // larger session/observation walk below) so mem::remember-created
+  // records become searchable as early as possible in a cold rebuild —
+  // the observation walk over every historical session can dominate
+  // wall-clock time on a long-lived deployment.
   let memories: Memory[] = []
+  let indexed = 0
   try {
-    memories = await kv.list<Memory>(KV.memories)
+    memories = await withTimeout(
+      kv.list<Memory>(KV.memories),
+      REBUILD_KV_TIMEOUT_MS,
+      'rebuildIndex: list memories',
+    )
   } catch (err) {
-    logger.warn('rebuildIndex: failed to load memories', {
+    logger.error('rebuildIndex: failed to load memories', {
       error: err instanceof Error ? err.message : String(err),
     })
   }
+  if (memories.length > 0) {
+    indexed += await indexRecords([], memories)
+  }
 
-  const sessions = await kv.list<Session>(KV.sessions)
+  let sessions: Session[] = []
+  try {
+    sessions = await withTimeout(
+      kv.list<Session>(KV.sessions),
+      REBUILD_KV_TIMEOUT_MS,
+      'rebuildIndex: list sessions',
+    )
+  } catch (err) {
+    logger.error('rebuildIndex: failed to load sessions — observations will not be indexed', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return indexed
+  }
+
   const failedSessions: string[] = []
   // Index each session chunk as it loads instead of accumulating every
   // observation first, so peak memory stays bounded to one chunk.
-  let indexed = 0
   for (let batch = 0; batch < sessions.length; batch += 10) {
     const chunk = sessions.slice(batch, batch + 10)
     const results = await Promise.all(
       chunk.map(async (s) => {
         try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id))
-        } catch {
+          return await withTimeout(
+            kv.list<CompressedObservation>(KV.observations(s.id)),
+            REBUILD_KV_TIMEOUT_MS,
+            `rebuildIndex: list observations for session ${s.id}`,
+          )
+        } catch (err) {
           failedSessions.push(s.id)
+          logger.error('rebuildIndex: failed to load observations for session', {
+            sessionId: s.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
           return [] as CompressedObservation[]
         }
       })
@@ -333,10 +398,9 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
     }
   }
   if (failedSessions.length > 0) {
-    logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
+    logger.error('rebuildIndex: failed to load observations for sessions', { failedSessions })
   }
 
-  indexed += await indexRecords([], memories)
   return indexed
 }
 

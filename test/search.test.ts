@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -208,5 +208,178 @@ describe("mem::search", () => {
     // Cleanup
     setVectorIndex(null);
     setEmbeddingProvider(null);
+  });
+});
+
+describe("rebuildIndex hardening (2026-08-19 stuck-rebuild incident)", () => {
+  let kv: ReturnType<typeof mockKV>;
+
+  beforeEach(async () => {
+    kv = mockKV();
+
+    const session: Session = {
+      id: "ses_1",
+      project: "demo",
+      cwd: "/tmp/demo",
+      startedAt: "2026-01-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    };
+    await kv.set(KV.sessions, session.id, session);
+    const obs: CompressedObservation = {
+      id: "obs_a",
+      sessionId: "ses_1",
+      timestamp: "2026-01-01T00:00:00Z",
+      type: "decision",
+      title: "Auth middleware decision",
+      subtitle: "JWT strategy",
+      facts: ["Use rotating refresh tokens"],
+      narrative: "Implemented auth middleware with JWT refresh rotation.",
+      concepts: ["auth", "jwt"],
+      files: ["src/auth.ts"],
+      importance: 8,
+    };
+    await kv.set(KV.observations("ses_1"), obs.id, obs);
+
+    await kv.set(KV.memories, "mem_a", {
+      id: "mem_a",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact",
+      title: "Runbook LVM merge notes",
+      content: "runbook-lvm-merge steps for vps migration.",
+      concepts: ["lvm"],
+      files: [],
+      sessionIds: [],
+      strength: 5,
+      version: 1,
+      isLatest: true,
+    });
+
+    getSearchIndex().clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not hang forever when one session's observation read never resolves — other sessions and memories still get indexed", async () => {
+    vi.useFakeTimers();
+
+    const stuckSession: Session = {
+      id: "ses_stuck",
+      project: "demo",
+      cwd: "/tmp/demo",
+      startedAt: "2026-01-01T00:00:00Z",
+      status: "completed",
+      observationCount: 0,
+    };
+    await kv.set(KV.sessions, stuckSession.id, stuckSession);
+
+    const hangingKv = {
+      ...kv,
+      list: (async (scope: string) => {
+        if (scope === KV.observations("ses_stuck")) {
+          return new Promise(() => {
+            /* never resolves — simulates a wedged iii read */
+          });
+        }
+        return kv.list(scope as never);
+      }) as typeof kv.list,
+    };
+
+    const rebuildPromise = rebuildIndex(hangingKv as never);
+    // Advance past the 15s per-call budget so the stuck session's read
+    // times out instead of blocking the whole rebuild forever.
+    await vi.advanceTimersByTimeAsync(20_000);
+    const count = await rebuildPromise;
+
+    // mem_a (memory) + obs_a (from the healthy ses_1) both made it in;
+    // only ses_stuck's read was abandoned.
+    expect(count).toBe(2);
+    expect(getSearchIndex().search("runbook-lvm-merge").length).toBe(1);
+    expect(getSearchIndex().search("auth middleware").length).toBe(1);
+  });
+
+  it("indexes memories even when the sessions list itself fails, and returns early without hanging", async () => {
+    const failingKv = {
+      ...kv,
+      list: (async (scope: string) => {
+        if (scope === KV.sessions) {
+          throw new Error("sessions scope unavailable");
+        }
+        return kv.list(scope as never);
+      }) as typeof kv.list,
+    };
+
+    const count = await rebuildIndex(failingKv as never);
+
+    expect(count).toBe(1); // mem_a only — session/observation walk never ran
+    expect(getSearchIndex().search("runbook-lvm-merge").length).toBe(1);
+    expect(getSearchIndex().search("auth middleware").length).toBe(0);
+  });
+
+  it("logs at error level (not warn) when a session's observations fail to load, and still finishes", async () => {
+    const { logger } = await import("../src/logger.js");
+    const failingKv = {
+      ...kv,
+      list: (async (scope: string) => {
+        if (scope === KV.observations("ses_1")) {
+          throw new Error("observations scope unavailable");
+        }
+        return kv.list(scope as never);
+      }) as typeof kv.list,
+    };
+
+    const count = await rebuildIndex(failingKv as never);
+
+    expect(count).toBe(1); // mem_a only
+    expect(logger.error).toHaveBeenCalledWith(
+      "rebuildIndex: failed to load observations for session",
+      expect.objectContaining({ sessionId: "ses_1" }),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "rebuildIndex: failed to load observations for sessions",
+      expect.objectContaining({ failedSessions: ["ses_1"] }),
+    );
+  });
+
+  it("logs at error level when memories fail to load, but still indexes observations", async () => {
+    const { logger } = await import("../src/logger.js");
+    const failingKv = {
+      ...kv,
+      list: (async (scope: string) => {
+        if (scope === KV.memories) {
+          throw new Error("memories scope unavailable");
+        }
+        return kv.list(scope as never);
+      }) as typeof kv.list,
+    };
+
+    const count = await rebuildIndex(failingKv as never);
+
+    expect(count).toBe(1); // obs_a only
+    expect(logger.error).toHaveBeenCalledWith(
+      "rebuildIndex: failed to load memories",
+      expect.objectContaining({ error: expect.any(String) }),
+    );
+  });
+
+  it("indexes memories before the (potentially much larger) session/observation walk", async () => {
+    // Regression guard for ordering: memories must be indexed first so a
+    // slow observation walk can't keep mem::remember-created records
+    // unsearchable for the whole rebuild's duration.
+    const order: string[] = [];
+    const trackedKv = {
+      ...kv,
+      list: (async (scope: string) => {
+        order.push(scope);
+        return kv.list(scope as never);
+      }) as typeof kv.list,
+    };
+
+    await rebuildIndex(trackedKv as never);
+
+    expect(order[0]).toBe(KV.memories);
   });
 });

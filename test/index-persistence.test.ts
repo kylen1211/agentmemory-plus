@@ -622,6 +622,77 @@ describe("IndexPersistence", () => {
     expect(loaded.bm25).toBeNull();
   });
 
+  // 2026-08-19 incident: bm25.size === 0 was the ONLY thing that triggered
+  // a full rebuild at boot (index.ts). A vector-only shard loss (manifest
+  // present, shard missing) left `loaded.vector` null with no distinct
+  // signal from "nothing was ever persisted" — so nothing downstream ever
+  // knew to rebuild it. `xLoadFailed` closes that gap.
+  describe("bm25LoadFailed / vectorLoadFailed", () => {
+    it("reports bm25LoadFailed=true when a manifest exists but its shard is missing", async () => {
+      const bm25 = makeBm25("obs_1", "alpha sharded snapshot");
+      await new IndexPersistence(kv as never, bm25, null, {
+        shardChars: 80,
+        createGeneration: () => "gen_missing",
+      }).save();
+      const manifest = await getBm25Manifest(kv);
+      await kv.delete(manifest.shards[0].scope, manifest.shards[0].key);
+
+      const loaded = await new IndexPersistence(
+        kv as never,
+        new SearchIndex(),
+        null,
+      ).load();
+
+      expect(loaded.bm25).toBeNull();
+      expect(loaded.bm25LoadFailed).toBe(true);
+      expect(loaded.vectorLoadFailed).toBe(false);
+    });
+
+    it("reports vectorLoadFailed=true independently of a healthy bm25 load", async () => {
+      const bm25 = makeBm25("obs_1", "alpha sharded snapshot");
+      const vector = makeVector("obs_1");
+      await new IndexPersistence(kv as never, bm25, vector, {
+        shardChars: 80,
+        createGeneration: () => "gen_both",
+      }).save();
+      const vectorManifest = await kv.get<TestIndexShardManifest>(
+        BM25_SCOPE,
+        VECTOR_MANIFEST_KEY,
+      );
+      await kv.delete(
+        vectorManifest!.shards[0].scope,
+        vectorManifest!.shards[0].key,
+      );
+
+      const loaded = await new IndexPersistence(
+        kv as never,
+        new SearchIndex(),
+        null,
+      ).load();
+
+      // BM25 is intact and loadable...
+      expect(loaded.bm25).not.toBeNull();
+      expect(loaded.bm25LoadFailed).toBe(false);
+      // ...but the vector shard loss is reported distinctly, not masked
+      // by bm25's success.
+      expect(loaded.vector).toBeNull();
+      expect(loaded.vectorLoadFailed).toBe(true);
+    });
+
+    it("reports xLoadFailed=false on a genuine fresh install (no manifest, no legacy data)", async () => {
+      const loaded = await new IndexPersistence(
+        kv as never,
+        new SearchIndex(),
+        null,
+      ).load();
+
+      expect(loaded.bm25).toBeNull();
+      expect(loaded.vector).toBeNull();
+      expect(loaded.bm25LoadFailed).toBe(false);
+      expect(loaded.vectorLoadFailed).toBe(false);
+    });
+  });
+
   it("fails closed when a manifest shard length mismatches", async () => {
     const bm25 = makeBm25("obs_1", "alpha sharded snapshot");
     await new IndexPersistence(kv as never, bm25, null, {

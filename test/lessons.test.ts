@@ -109,6 +109,51 @@ describe("Lessons", () => {
       expect(second.lesson.confidence).toBeGreaterThan(0.5);
     });
 
+    it("backfills agentId on strengthen when existing lesson has none and request supplies one", async () => {
+      const first = (await sdk.trigger("mem::lesson-save", {
+        content: "No agent yet",
+      })) as { lesson: Lesson };
+      expect(first.lesson.agentId).toBeUndefined();
+
+      const second = (await sdk.trigger("mem::lesson-save", {
+        content: "No agent yet",
+        agentId: "backend-dev",
+      })) as { action: string; lesson: Lesson };
+
+      expect(second.action).toBe("strengthened");
+      expect(second.lesson.agentId).toBe("backend-dev");
+    });
+
+    it("does not overwrite an existing agentId on strengthen, regardless of what the request supplies", async () => {
+      const first = (await sdk.trigger("mem::lesson-save", {
+        content: "Already owned lesson",
+        agentId: "backend-dev",
+      })) as { lesson: Lesson };
+      expect(first.lesson.agentId).toBe("backend-dev");
+
+      const second = (await sdk.trigger("mem::lesson-save", {
+        content: "Already owned lesson",
+        agentId: "frontend-dev",
+      })) as { action: string; lesson: Lesson };
+
+      expect(second.action).toBe("strengthened");
+      expect(second.lesson.agentId).toBe("backend-dev");
+    });
+
+    it("leaves agentId undefined on strengthen when neither existing nor request has one", async () => {
+      const first = (await sdk.trigger("mem::lesson-save", {
+        content: "Nobody owns this",
+      })) as { lesson: Lesson };
+      expect(first.lesson.agentId).toBeUndefined();
+
+      const second = (await sdk.trigger("mem::lesson-save", {
+        content: "Nobody owns this",
+      })) as { action: string; lesson: Lesson };
+
+      expect(second.action).toBe("strengthened");
+      expect(second.lesson.agentId).toBeUndefined();
+    });
+
     it("rejects empty content", async () => {
       const result = (await sdk.trigger("mem::lesson-save", {
         content: "",
@@ -131,6 +176,25 @@ describe("Lessons", () => {
     });
   });
 
+  describe("mem::lesson-save agentId", () => {
+    it("stores agentId when provided", async () => {
+      const result = (await sdk.trigger("mem::lesson-save", {
+        content: "Backend lesson",
+        agentId: "backend-dev",
+      })) as { lesson: Lesson };
+
+      expect(result.lesson.agentId).toBe("backend-dev");
+    });
+
+    it("leaves agentId undefined when not provided (existing behavior unchanged)", async () => {
+      const result = (await sdk.trigger("mem::lesson-save", {
+        content: "No agent lesson",
+      })) as { lesson: Lesson };
+
+      expect(result.lesson.agentId).toBeUndefined();
+    });
+  });
+
   describe("mem::lesson-recall", () => {
     beforeEach(async () => {
       await sdk.trigger("mem::lesson-save", {
@@ -150,6 +214,40 @@ describe("Lessons", () => {
         project: "/other",
         tags: ["typescript"],
       });
+      await sdk.trigger("mem::lesson-save", {
+        content: "Always use timeouts on external calls",
+        project: "/app",
+        tags: ["reliability"],
+        agentId: "backend-dev",
+      });
+    });
+
+    it("filters by agentId when provided", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "timeouts external calls",
+        agentId: "backend-dev",
+      })) as { lessons: Lesson[] };
+
+      expect(result.lessons.length).toBe(1);
+      expect(result.lessons[0].agentId).toBe("backend-dev");
+    });
+
+    it("returns nothing when agentId filter does not match any lesson", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "timeouts external calls",
+        agentId: "frontend-dev",
+      })) as { lessons: Lesson[] };
+
+      expect(result.lessons.length).toBe(0);
+    });
+
+    it("does not filter by agentId when not provided — old and new lessons all returned", async () => {
+      const result = (await sdk.trigger("mem::lesson-recall", {
+        query: "always",
+      })) as { lessons: Lesson[] };
+
+      // "Always validate..." (no agentId) and "Always use timeouts..." (agentId set)
+      expect(result.lessons.length).toBe(2);
     });
 
     it("finds lessons matching query", async () => {
@@ -226,6 +324,35 @@ describe("Lessons", () => {
     it("filters by minConfidence", async () => {
       const result = (await sdk.trigger("mem::lesson-list", { minConfidence: 0.5 })) as { lessons: Lesson[] };
       expect(result.lessons.length).toBe(2);
+    });
+  });
+
+  describe("mem::lesson-list agentId", () => {
+    beforeEach(async () => {
+      await sdk.trigger("mem::lesson-save", { content: "No-agent lesson", confidence: 0.6 });
+      await sdk.trigger("mem::lesson-save", {
+        content: "Backend-owned lesson",
+        confidence: 0.6,
+        agentId: "backend-dev",
+      });
+    });
+
+    it("filters by agentId", async () => {
+      const result = (await sdk.trigger("mem::lesson-list", { agentId: "backend-dev" })) as { lessons: Lesson[] };
+      expect(result.lessons.length).toBe(1);
+      expect(result.lessons[0].content).toBe("Backend-owned lesson");
+    });
+
+    it("returns empty when agentId does not match any lesson", async () => {
+      const result = (await sdk.trigger("mem::lesson-list", { agentId: "frontend-dev" })) as { lessons: Lesson[] };
+      expect(result.lessons.length).toBe(0);
+    });
+
+    it("returns all lessons (old and new) when agentId is not provided", async () => {
+      const result = (await sdk.trigger("mem::lesson-list", {})) as { lessons: Lesson[] };
+      expect(result.lessons.length).toBe(2);
+      expect(result.lessons.some((l) => l.agentId === "backend-dev")).toBe(true);
+      expect(result.lessons.some((l) => l.agentId === undefined)).toBe(true);
     });
 
     it("respects limit", async () => {

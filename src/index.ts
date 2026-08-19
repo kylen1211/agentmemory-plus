@@ -474,7 +474,31 @@ async function main() {
     }
   }
 
-  const needsRebuild = bm25Index.size === 0;
+  // 2026-08-19 incident: BM25 and vector shards can go missing/corrupt
+  // independently of each other (they're saved and can fail separately —
+  // see saveShardedIndex). The full rebuild below is the ONLY thing that
+  // repopulates vectors from source data, but it used to be gated solely
+  // on `bm25Index.size === 0`. When BM25 happened to load fine (or
+  // self-healed on a later boot) while the vector shard stayed missing,
+  // the vector index silently stayed empty forever — no rebuild trigger
+  // ever fired for it, and nothing logged the gap beyond the one-line
+  // warn (now error) at load time. `vectorLoadFailed` distinguishes
+  // "a vector manifest existed but its data is gone" from "no vectors
+  // were ever persisted" (fresh install / no embedding provider
+  // configured at write time), so only the former forces a rebuild.
+  const vectorNeedsRebuild =
+    Boolean(embeddingProvider) &&
+    Boolean(vectorIndex) &&
+    vectorIndex!.size === 0 &&
+    Boolean(loaded?.vectorLoadFailed);
+  const needsRebuild = bm25Index.size === 0 || vectorNeedsRebuild;
+
+  if (vectorNeedsRebuild && bm25Index.size > 0) {
+    console.warn(
+      `[agentmemory] Persisted vector index shard(s) missing/corrupt while BM25 ` +
+        `loaded fine — forcing a full rebuild to repopulate vectors from source data.`,
+    );
+  }
 
   if (needsRebuild) {
     // Fire-and-forget. rebuildIndex iterates every observation across
