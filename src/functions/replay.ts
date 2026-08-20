@@ -10,7 +10,13 @@ import type {
   Session,
 } from "../types.js";
 import type { StateKV } from "../state/kv.js";
-import { KV, generateId, fingerprintId } from "../state/schema.js";
+import {
+  KV,
+  generateId,
+  fingerprintId,
+  lessonFingerprint,
+  CRYSTAL_ID_PREFIX,
+} from "../state/schema.js";
 import { parseJsonlText } from "../replay/jsonl-parser.js";
 import { projectTimeline, type Timeline } from "../replay/timeline.js";
 import { safeAudit } from "./audit.js";
@@ -116,7 +122,7 @@ async function deriveCrystalAndLessons(
     // Content-addressed ID so re-importing the same JSONL does not
     // duplicate lessons. fingerprintId hashes the normalized content,
     // giving a stable lesson_xxx for identical text.
-    const lessonId = fingerprintId("lesson", content.trim().toLowerCase());
+    const lessonId = lessonFingerprint(content);
     try {
       const existing = await kv.get<Lesson>(KV.lessons, lessonId);
       if (existing) {
@@ -160,7 +166,7 @@ async function deriveCrystalAndLessons(
 
   // Content-addressed on sessionId so re-importing the same session
   // upserts the crystal in place instead of creating a new one.
-  const crystalId = fingerprintId("crystal", sessionId);
+  const crystalId = fingerprintId(CRYSTAL_ID_PREFIX, sessionId);
   const narrativePreview = firstPrompt
     ? firstPrompt.slice(0, 300)
     : compressed

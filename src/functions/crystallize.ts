@@ -1,6 +1,6 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
-import { KV, generateId } from "../state/schema.js";
+import { KV, generateId, CRYSTAL_ID_PREFIX } from "../state/schema.js";
 import { consolidationDue } from "../state/consolidation-gate.js";
 import type { Action, ActionEdge, Crystal, MemoryProvider } from "../types.js";
 
@@ -59,7 +59,7 @@ export function registerCrystallizeFunction(
         const digest = parseDigest(response);
 
         const crystal: Crystal = {
-          id: generateId("crys"),
+          id: generateId(CRYSTAL_ID_PREFIX),
           narrative: digest.narrative,
           keyOutcomes: digest.keyOutcomes,
           filesAffected: digest.filesAffected,

@@ -5,7 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerCheckpointsFunction } from "../src/functions/checkpoints.js";
-import type { Action, ActionEdge, Checkpoint } from "../src/types.js";
+import type { Action, ActionEdge, Checkpoint, Sentinel } from "../src/types.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -283,6 +283,88 @@ describe("Checkpoint Functions", () => {
       const action = await kv.get<Action>("mem:actions", "act_1");
       expect(action!.status).toBe("blocked");
     });
+
+    it("does NOT unblock a dual-gated action when checkpoint passes but a linked sentinel gate is still watching (implicit polymorphic gated_by target)", async () => {
+      await kv.set("mem:actions", "act_1", makeAction("act_1", "blocked"));
+
+      const cp = (await sdk.trigger("mem::checkpoint-create", {
+        name: "CI Gate",
+        linkedActionIds: ["act_1"],
+      })) as { success: boolean; checkpoint: Checkpoint };
+
+      // sentinel-gated edge created directly (mirrors mem::sentinel-create's own
+      // gated_by edge creation, which is not registered in this test file).
+      const sentinel: Sentinel = {
+        id: "snl_1",
+        name: "Approval wait",
+        type: "approval",
+        status: "watching",
+        config: {},
+        createdAt: new Date().toISOString(),
+        linkedActionIds: ["act_1"],
+      };
+      await kv.set("mem:sentinels", sentinel.id, sentinel);
+      await kv.set("mem:action-edges", "ae_snl", {
+        id: "ae_snl",
+        type: "gated_by",
+        sourceActionId: "act_1",
+        targetActionId: sentinel.id,
+        createdAt: new Date().toISOString(),
+      } satisfies ActionEdge);
+
+      const result = (await sdk.trigger("mem::checkpoint-resolve", {
+        checkpointId: cp.checkpoint.id,
+        status: "passed",
+      })) as { success: boolean; unblockedCount: number };
+
+      expect(result.success).toBe(true);
+      // 若漏查 sentinel(把它当查不到的 checkpoint 静默放行),这里会误判为 1。
+      expect(result.unblockedCount).toBe(0);
+
+      const action = await kv.get<Action>("mem:actions", "act_1");
+      expect(action!.status).toBe("blocked");
+    });
+
+    it.each(["triggered", "expired"] as const)(
+      "unblocks a dual-gated action once checkpoint passed and linked sentinel is %s",
+      async (sentinelStatus) => {
+        await kv.set("mem:actions", "act_1", makeAction("act_1", "blocked"));
+
+        const cp = (await sdk.trigger("mem::checkpoint-create", {
+          name: "CI Gate",
+          linkedActionIds: ["act_1"],
+        })) as { success: boolean; checkpoint: Checkpoint };
+
+        const sentinel: Sentinel = {
+          id: "snl_2",
+          name: "Approval wait",
+          type: "approval",
+          status: sentinelStatus,
+          config: {},
+          createdAt: new Date().toISOString(),
+          linkedActionIds: ["act_1"],
+        };
+        await kv.set("mem:sentinels", sentinel.id, sentinel);
+        await kv.set("mem:action-edges", "ae_snl_2", {
+          id: "ae_snl_2",
+          type: "gated_by",
+          sourceActionId: "act_1",
+          targetActionId: sentinel.id,
+          createdAt: new Date().toISOString(),
+        } satisfies ActionEdge);
+
+        const result = (await sdk.trigger("mem::checkpoint-resolve", {
+          checkpointId: cp.checkpoint.id,
+          status: "passed",
+        })) as { success: boolean; unblockedCount: number };
+
+        expect(result.success).toBe(true);
+        expect(result.unblockedCount).toBe(1);
+
+        const action = await kv.get<Action>("mem:actions", "act_1");
+        expect(action!.status).toBe("pending");
+      },
+    );
 
     it("does not unblock actions that are not in blocked status", async () => {
       await kv.set("mem:actions", "act_1", makeAction("act_1", "active"));

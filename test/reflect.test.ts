@@ -1,10 +1,24 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+// isConsolidationEnabled defaults to true here so the existing "reflect
+// actually runs" tests below stay deterministic regardless of the host
+// machine's real CONSOLIDATION_ENABLED / LLM-key env (see consolidation-
+// pipeline.test.ts for the same pattern). The disabled-gate tests further
+// down override this per-test with mockReturnValue(false).
+vi.mock("../src/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config.js")>();
+  return {
+    ...actual,
+    isConsolidationEnabled: vi.fn(() => true),
+  };
+});
+
 import { registerReflectFunctions } from "../src/functions/reflect.js";
+import { isConsolidationEnabled } from "../src/config.js";
 import type { Insight, GraphNode, GraphEdge, SemanticMemory, Lesson, Crystal } from "../src/types.js";
 
 function mockKV() {
@@ -138,6 +152,46 @@ describe("Reflect", () => {
   });
 
   describe("mem::reflect", () => {
+    afterEach(() => {
+      vi.mocked(isConsolidationEnabled).mockReturnValue(true);
+    });
+
+    it("insight-dedup-guard: skips and does not call the provider when CONSOLIDATION_ENABLED=false (REST /agentmemory/reflect entry point had no gate before this fix)", async () => {
+      vi.mocked(isConsolidationEnabled).mockReturnValue(false);
+
+      await kv.set("mem:graph:nodes", "node_security", makeConceptNode("security"));
+      await kv.set("mem:graph:nodes", "node_validation", makeConceptNode("validation"));
+      await kv.set("mem:graph:edges", "edge_1", makeEdge("security", "validation"));
+      await kv.set("mem:semantic", "sem_1", makeSemantic("Always validate security inputs"));
+      await kv.set("mem:semantic", "sem_2", makeSemantic("Testing improves security coverage"));
+      await kv.set("mem:semantic", "sem_3", makeSemantic("Validation prevents injection attacks"));
+
+      const result = (await sdk.trigger("mem::reflect", {})) as {
+        success: boolean;
+        skipped?: boolean;
+        reason?: string;
+      };
+
+      expect(result.success).toBe(false);
+      expect(result.skipped).toBe(true);
+      expect(result.reason).toMatch(/Consolidation disabled/);
+      expect(provider.summarize).not.toHaveBeenCalled();
+      expect((await kv.list<Insight>("mem:insights")).length).toBe(0);
+    });
+
+    it("insight-dedup-guard: the disabled check is unconditional — bypassCooldown does not also bypass it", async () => {
+      vi.mocked(isConsolidationEnabled).mockReturnValue(false);
+
+      const result = (await sdk.trigger("mem::reflect", {
+        bypassCooldown: true,
+      })) as { success: boolean; skipped?: boolean; reason?: string };
+
+      expect(result.success).toBe(false);
+      expect(result.skipped).toBe(true);
+      expect(result.reason).toMatch(/Consolidation disabled/);
+      expect(provider.summarize).not.toHaveBeenCalled();
+    });
+
     it("returns empty when no graph nodes or memories exist", async () => {
       const result = (await sdk.trigger("mem::reflect", {})) as {
         success: boolean;

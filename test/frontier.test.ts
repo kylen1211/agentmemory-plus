@@ -6,7 +6,7 @@ vi.mock("../src/logger.js", () => ({
 
 import { registerFrontierFunction } from "../src/functions/frontier.js";
 import { registerActionsFunction } from "../src/functions/actions.js";
-import type { Action, ActionEdge, Checkpoint, Lease } from "../src/types.js";
+import type { Action, ActionEdge, Checkpoint, Lease, Sentinel } from "../src/types.js";
 import type { FrontierItem } from "../src/functions/frontier.js";
 
 function mockKV() {
@@ -281,6 +281,160 @@ describe("Frontier Functions", () => {
 
       expect(result.frontier.length).toBe(0);
     });
+
+    it("excludes actions gated by a watching sentinel (implicit polymorphic gated_by target)", async () => {
+      const gatedAction = makeAction({
+        id: "act_gated_sentinel",
+        title: "Sentinel gated action",
+        status: "pending",
+      });
+
+      const sentinel: Sentinel = {
+        id: "snl_1",
+        name: "Webhook wait",
+        type: "webhook",
+        status: "watching",
+        config: {},
+        createdAt: new Date().toISOString(),
+        linkedActionIds: ["act_gated_sentinel"],
+      };
+
+      await kv.set("mem:actions", gatedAction.id, gatedAction);
+      await kv.set("mem:sentinels", sentinel.id, sentinel);
+
+      const gateEdge: ActionEdge = {
+        id: "ae_gate_sentinel",
+        type: "gated_by",
+        sourceActionId: gatedAction.id,
+        targetActionId: sentinel.id,
+        createdAt: new Date().toISOString(),
+      };
+      await kv.set("mem:action-edges", gateEdge.id, gateEdge);
+
+      const result = (await sdk.trigger("mem::frontier", {})) as {
+        success: boolean;
+        frontier: FrontierItem[];
+      };
+
+      expect(result.frontier.length).toBe(0);
+    });
+
+    it("dual-gated action (checkpoint passed + sentinel still watching) stays blocked — not a false unblock", async () => {
+      const gatedAction = makeAction({
+        id: "act_dual_gated",
+        title: "Dual gated action",
+        status: "pending",
+      });
+
+      const checkpoint: Checkpoint = {
+        id: "ckpt_dual",
+        name: "CI check",
+        description: "",
+        status: "passed",
+        type: "ci",
+        createdAt: new Date().toISOString(),
+        linkedActionIds: ["act_dual_gated"],
+      };
+      const sentinel: Sentinel = {
+        id: "snl_dual",
+        name: "Approval wait",
+        type: "approval",
+        status: "watching",
+        config: {},
+        createdAt: new Date().toISOString(),
+        linkedActionIds: ["act_dual_gated"],
+      };
+
+      await kv.set("mem:actions", gatedAction.id, gatedAction);
+      await kv.set("mem:checkpoints", checkpoint.id, checkpoint);
+      await kv.set("mem:sentinels", sentinel.id, sentinel);
+
+      const cpEdge: ActionEdge = {
+        id: "ae_dual_cp",
+        type: "gated_by",
+        sourceActionId: gatedAction.id,
+        targetActionId: checkpoint.id,
+        createdAt: new Date().toISOString(),
+      };
+      const snEdge: ActionEdge = {
+        id: "ae_dual_snl",
+        type: "gated_by",
+        sourceActionId: gatedAction.id,
+        targetActionId: sentinel.id,
+        createdAt: new Date().toISOString(),
+      };
+      await kv.set("mem:action-edges", cpEdge.id, cpEdge);
+      await kv.set("mem:action-edges", snEdge.id, snEdge);
+
+      const result = (await sdk.trigger("mem::frontier", {})) as {
+        success: boolean;
+        frontier: FrontierItem[];
+      };
+
+      // checkpoint 已 passed 但 sentinel 仍 watching:整体仍应判定为 blocked。
+      // 若漏掉 sentinel 分支(把 sentinel 边当成查不到的 checkpoint 静默放行),
+      // 这里会误判为已解闸,frontier.length 变成 1。
+      expect(result.frontier.length).toBe(0);
+    });
+
+    it.each(["triggered", "expired"] as const)(
+      "dual-gated action unblocks once checkpoint passed and sentinel is %s",
+      async (sentinelStatus) => {
+        const gatedAction = makeAction({
+          id: "act_dual_resolved",
+          title: "Dual gated action resolved",
+          status: "pending",
+        });
+
+        const checkpoint: Checkpoint = {
+          id: "ckpt_resolved",
+          name: "CI check",
+          description: "",
+          status: "passed",
+          type: "ci",
+          createdAt: new Date().toISOString(),
+          linkedActionIds: ["act_dual_resolved"],
+        };
+        const sentinel: Sentinel = {
+          id: "snl_resolved",
+          name: "Approval wait",
+          type: "approval",
+          status: sentinelStatus,
+          config: {},
+          createdAt: new Date().toISOString(),
+          linkedActionIds: ["act_dual_resolved"],
+        };
+
+        await kv.set("mem:actions", gatedAction.id, gatedAction);
+        await kv.set("mem:checkpoints", checkpoint.id, checkpoint);
+        await kv.set("mem:sentinels", sentinel.id, sentinel);
+
+        const cpEdge: ActionEdge = {
+          id: "ae_resolved_cp",
+          type: "gated_by",
+          sourceActionId: gatedAction.id,
+          targetActionId: checkpoint.id,
+          createdAt: new Date().toISOString(),
+        };
+        const snEdge: ActionEdge = {
+          id: "ae_resolved_snl",
+          type: "gated_by",
+          sourceActionId: gatedAction.id,
+          targetActionId: sentinel.id,
+          createdAt: new Date().toISOString(),
+        };
+        await kv.set("mem:action-edges", cpEdge.id, cpEdge);
+        await kv.set("mem:action-edges", snEdge.id, snEdge);
+
+        const result = (await sdk.trigger("mem::frontier", {})) as {
+          success: boolean;
+          frontier: FrontierItem[];
+        };
+
+        expect(result.frontier.length).toBe(1);
+        expect(result.frontier[0].action.id).toBe("act_dual_resolved");
+      },
+    );
 
     it("excludes actions conflicting with active actions", async () => {
       const activeAction = makeAction({

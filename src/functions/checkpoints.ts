@@ -2,8 +2,9 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import type { Action, ActionEdge, Checkpoint } from "../types.js";
+import type { Action, ActionEdge, Checkpoint, Sentinel } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { buildCheckpointMap, buildSentinelMap, resolveGate } from "./gates.js";
 
 export function registerCheckpointsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::checkpoint-create", 
@@ -132,8 +133,10 @@ export function registerCheckpointsFunction(sdk: ISdk, kv: StateKV): void {
           if (data.status === "passed" && checkpoint.linkedActionIds.length > 0) {
             const allEdges = await kv.list<ActionEdge>(KV.actionEdges);
             const allCheckpoints = await kv.list<Checkpoint>(KV.checkpoints);
+            const allSentinels = await kv.list<Sentinel>(KV.sentinels);
             const allActions = await kv.list<Action>(KV.actions);
-            const cpMap = new Map(allCheckpoints.map((c) => [c.id, c]));
+            const cpMap = buildCheckpointMap(allCheckpoints);
+            const snMap = buildSentinelMap(allSentinels);
             const actionMap = new Map(allActions.map((a) => [a.id, a]));
 
             for (const actionId of checkpoint.linkedActionIds) {
@@ -143,9 +146,12 @@ export function registerCheckpointsFunction(sdk: ISdk, kv: StateKV): void {
                   const gates = allEdges.filter(
                     (e) => e.sourceActionId === actionId && e.type === "gated_by",
                   );
+                  // gated_by 目标可能是 checkpoint 也可能是 sentinel(隐式多态外键,
+                  // 见 gates.ts 头注释);两者都必须查,漏查 sentinel 会让双闸 action
+                  // 永久卡在 blocked——这正是本次修的 bug。
                   const allGatesPassed = gates.every((g) => {
-                    const cp = cpMap.get(g.targetActionId);
-                    return cp && cp.status === "passed";
+                    const gate = resolveGate(g.targetActionId, cpMap, snMap);
+                    return !!gate?.passed;
                   });
                   const requires = allEdges.filter(
                     (e) => e.sourceActionId === actionId && e.type === "requires",

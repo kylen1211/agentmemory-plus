@@ -4,6 +4,7 @@ import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type { Action, ActionEdge, Checkpoint, CompressedObservation, FunctionMetrics, Sentinel, Session } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { buildCheckpointMap, buildSentinelMap, resolveGate } from "./gates.js";
 
 const VALID_TYPES: Sentinel["type"][] = [
   "webhook",
@@ -420,9 +421,8 @@ async function unblockLinkedActions(
   const allEdges = await kv.list<ActionEdge>(KV.actionEdges);
   const allSentinels = await kv.list<Sentinel>(KV.sentinels);
   const allCheckpoints = await kv.list<Checkpoint>(KV.checkpoints);
-  const gateMap = new Map<string, { status: string }>();
-  for (const s of allSentinels) gateMap.set(s.id, { status: s.status === "triggered" ? "passed" : s.status });
-  for (const c of allCheckpoints) gateMap.set(c.id, { status: c.status });
+  const cpMap = buildCheckpointMap(allCheckpoints);
+  const snMap = buildSentinelMap(allSentinels);
 
   let unblockedCount = 0;
 
@@ -434,8 +434,8 @@ async function unblockLinkedActions(
           (e) => e.sourceActionId === actionId && e.type === "gated_by",
         );
         const allPassed = gates.every((g) => {
-          const gate = gateMap.get(g.targetActionId);
-          return gate && gate.status === "passed";
+          const gate = resolveGate(g.targetActionId, cpMap, snMap);
+          return !!gate?.passed;
         });
         if (allPassed) {
           action.status = "pending";

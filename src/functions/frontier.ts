@@ -1,7 +1,8 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import type { Action, ActionEdge, Checkpoint, Lease } from "../types.js";
+import type { Action, ActionEdge, Checkpoint, Lease, Sentinel } from "../types.js";
+import { buildCheckpointMap, buildSentinelMap, resolveGate } from "./gates.js";
 
 export interface FrontierItem {
   action: Action;
@@ -22,6 +23,7 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
       const edges = await kv.list<ActionEdge>(KV.actionEdges);
       const leases = await kv.list<Lease>(KV.leases);
       const checkpoints = await kv.list<Checkpoint>(KV.checkpoints);
+      const sentinels = await kv.list<Sentinel>(KV.sentinels);
       const now = Date.now();
 
       const activeLeaseMap = new Map<string, Lease>();
@@ -34,10 +36,8 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      const checkpointMap = new Map<string, Checkpoint>();
-      for (const cp of checkpoints) {
-        checkpointMap.set(cp.id, cp);
-      }
+      const checkpointMap = buildCheckpointMap(checkpoints);
+      const sentinelMap = buildSentinelMap(sentinels);
 
       const actionMap = new Map<string, Action>();
       for (const a of actions) actionMap.set(a.id, a);
@@ -64,9 +64,13 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
           (e) => e.sourceActionId === action.id && e.type === "gated_by",
         );
         for (const edge of gateEdges) {
-          const cp = checkpointMap.get(edge.targetActionId);
-          if (cp && cp.status !== "passed") {
-            blockers.push(`checkpoint:${cp.id}:${cp.name}`);
+          const gate = resolveGate(edge.targetActionId, checkpointMap, sentinelMap);
+          if (!gate) {
+            // 悬空引用(既不是已知 checkpoint 也不是已知 sentinel):fail-closed,
+            // 继续阻塞而不是静默放行,避免损坏数据绕过闸门。
+            blockers.push(`gate:${edge.targetActionId}:unknown`);
+          } else if (!gate.passed) {
+            blockers.push(`${gate.kind}:${gate.id}:${gate.name}`);
           }
         }
 

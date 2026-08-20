@@ -1,6 +1,6 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
-import { KV, fingerprintId } from "../state/schema.js";
+import { KV, lessonFingerprint } from "../state/schema.js";
 import type { CompactLessonResult, Lesson } from "../types.js";
 import { recordAudit } from "./audit.js";
 
@@ -57,7 +57,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
         return { success: false, error: "content is required" };
       }
 
-      const fp = fingerprintId("lsn", data.content.trim().toLowerCase());
+      const fp = lessonFingerprint(data.content);
       const existing = await kv.get<Lesson>(KV.lessons, fp);
 
       if (existing && !existing.deleted) {

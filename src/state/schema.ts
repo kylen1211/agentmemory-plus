@@ -92,6 +92,38 @@ export function fingerprintId(prefix: string, content: string): string {
   return `${prefix}_${hash.slice(0, 16)}`;
 }
 
+// Lesson/Crystal each have two independent creation paths (mem::lesson-save
+// / mem::crystallize's direct API, and replay.ts's JSONL auto-import). They
+// used to call fingerprintId/generateId with different literal prefix
+// strings in each file ("lsn" vs "lesson", "crys" vs "crystal") — same
+// content hashed to two different KV keys, so content-addressed dedup
+// silently produced one record per path instead of one record total
+// (2026-08-20 fix). Both prefixes and the Lesson fingerprint formula now
+// live here as the single entry point; every creation call site must use
+// these instead of inlining fingerprintId/generateId with a literal prefix.
+export const LESSON_ID_PREFIX = "lsn";
+export const CRYSTAL_ID_PREFIX = "crys";
+
+// Lesson identity is fully content-addressed (same normalized content ==
+// same id) in both creation paths, so this single function is the real
+// convergence point: mem::lesson-save and replay.ts's auto-import now
+// produce the exact same id for the exact same content.
+export function lessonFingerprint(content: string): string {
+  return fingerprintId(LESSON_ID_PREFIX, content.trim().toLowerCase());
+}
+
+// Crystal identity is NOT unified the same way: mem::crystallize identifies
+// a crystal by an explicit, possibly-repeatable actionIds chain (an action
+// set legitimately gets crystallized once by design — see
+// Action.crystallizedInto — but the crystal itself has no natural content
+// key shared with replay.ts's per-session crystal), while replay.ts's
+// auto-import crystal is keyed by sessionId and an existing production data
+// model already allows multiple crystals per session (mem::crystal-list
+// filters by sessionId, not unique on it). Forcing both onto one identity
+// domain would change that accepted behavior, so only the prefix is
+// unified here; the two paths intentionally keep their own id algorithms
+// (generateId vs fingerprintId) — see crystallize.ts / replay.ts call sites.
+
 // CJK/Japanese/Thai text carries no inter-word whitespace, so a plain
 // split(/\s+/) collapses a whole sentence into one token and the two token
 // sets never overlap — dedup silently stops working. When either input

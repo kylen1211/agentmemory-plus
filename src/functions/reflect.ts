@@ -2,6 +2,7 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, fingerprintId } from "../state/schema.js";
 import { consolidationDue } from "../state/consolidation-gate.js";
+import { isConsolidationEnabled } from "../config.js";
 import type {
   Insight,
   GraphNode,
@@ -168,6 +169,25 @@ export function registerReflectFunctions(
 ): void {
   sdk.registerFunction("mem::reflect",
     async (data: { maxClusters?: number; project?: string; bypassCooldown?: boolean }) => {
+      // insight-dedup-guard: api::reflect (crontab POST /agentmemory/reflect,
+      // Sunday 04:30) used to be the one entry point that reached this
+      // function without ever having passed an isConsolidationEnabled()
+      // check anywhere upstream — mem::consolidate-pipeline's own reflect
+      // tier and every internal caller of that pipeline (events.ts, evict.ts)
+      // already gate on isConsolidationEnabled() before they ever reach here,
+      // so this check is unconditional (no bypass param) and redundant-but-
+      // harmless for those callers, while finally closing the gap for the
+      // direct REST path: with CONSOLIDATION_ENABLED=false in production,
+      // the weekly cron POST now produces zero new insights instead of
+      // silently regenerating near-duplicates every Sunday.
+      if (!isConsolidationEnabled()) {
+        return {
+          success: false,
+          skipped: true,
+          reason:
+            "Consolidation disabled: set CONSOLIDATION_ENABLED=true or configure an LLM provider (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY / MINIMAX_API_KEY / OPENAI_BASE_URL / AGENTMEMORY_PROVIDER=agent-sdk)",
+        };
+      }
       // FR-7 (ADR-9): bypassCooldown is internal-only, set by
       // consolidation-pipeline.ts's own call to mem::reflect so the
       // pipeline's reflect tier isn't blocked by the marker it just wrote.
