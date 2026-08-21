@@ -1,3 +1,5 @@
+> **本仓 agentmemory-plus 基于 [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) 二次开发,遵循 Apache-2.0 协议开源。**
+
 <p align="center">
   <img src="assets/banner.png" alt="agentmemory — Persistent memory for AI coding agents" width="720" />
 </p>
